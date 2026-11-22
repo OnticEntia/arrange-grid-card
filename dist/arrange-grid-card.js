@@ -24,12 +24,15 @@
  * https://github.com/OnticEntia/arrange-grid-card (MIT)
  */
 
-const VERSION = "0.13.0";
+const VERSION = "0.14.0";
 const TAG = "arrange-grid-card";
 const USER_KEY = "arrange_grid_card"; // frontend user data
 const LOCAL_KEY = "arrange-grid-card:layout:"; // + layout name, in localStorage
 const RESUME_KEY = "arrange-grid-card:resume:"; // + layout name, in sessionStorage: an Arrange a move interrupted
 const FOLD_KEY = "arrange-grid-card:folded:"; // + layout name (only with `storage: config`)
+const PREV_KEY = "arrange-grid-card:previous:"; // + the page's layout name: the arrangements before the last changes
+const PREV_KEEP = 5; // that many previous arrangements are kept for each page
+const UNDO_KEEP = 50; // steps of one Arrange that Undo can take back
 const MAX_COLS = 48;
 const MAX_ROWS = 400;
 const SECTION_COLS = 12; // what `grid_options.columns` counts in
@@ -350,6 +353,12 @@ const STYLE = `
 
   .bar .undo { flex-basis: 100%; display: flex; gap: 10px; align-items: center; justify-content: center; }
   .bar .undo[hidden] { display: none; }
+  .bar button:disabled { opacity: .4; cursor: default; }
+  .bar button.quiet { border-color: transparent; color: var(--secondary-text-color); }
+  .bar .ask { flex-basis: 100%; display: flex; flex-wrap: wrap; gap: 8px 10px; align-items: center; justify-content: center; padding-top: 8px;
+    border-top: 1px solid var(--divider-color, #444); }
+  .bar .ask span { flex-basis: 100%; text-align: center; color: var(--primary-text-color); }
+  .bar .ask button.danger { border-color: var(--error-color, #f87171); color: var(--error-color, #f87171); }
   .arr .mv .rm { border-color: var(--error-color, #f87171); }
   /* where a card being dragged is dropped to take it off the page */
   .trash { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); z-index: 8; display: none;
@@ -746,12 +755,14 @@ class ArrangeGridCard extends HTMLElement {
     const session = lead._arrSession || { moves: [], snap: null };
     const id = ArrangeGridCard.freeId(ArrangeGridCard.slug(entity), target._config.cards.map((c) => c.id));
     session.moves.push({ add: target._pathFromRoot(), id });
+    lead._arrCfgStep(session);
     session.gone = lead._goneAll();
     lead._resumeSave(session);
     lead._arrExit("save", true);
     const ok = await target._addTile(entity, id);
     if (!ok) {
       session.moves.pop();
+      (session.undo || []).pop();
       lead._resumeSave(null);
     }
     return ok;
@@ -801,12 +812,14 @@ class ArrangeGridCard extends HTMLElement {
     if (this._arrEdit) this._arrEdit.tiles = this._arrEdit.tiles.filter((t) => t.id !== kid.key);
     if (this._arrListEdit) this._arrListEdit.splice(0, this._arrListEdit.length, ...this._arrListEdit.filter((key) => key !== kid.key));
     session.moves.push({ from: this._pathFromRoot(), to: dest._pathFromRoot(), at, id, orig: raw.id == null ? null : raw.id });
+    lead._arrCfgStep(session);
     session.gone = lead._goneAll();
     lead._resumeSave(session);
     lead._arrExit("save", true);
     const ok = await this._moveCard(kid, dest, id);
     if (!ok) {
       session.moves.pop();
+      (session.undo || []).pop();
       lead._resumeSave(null);
     }
     return ok;
@@ -823,12 +836,14 @@ class ArrangeGridCard extends HTMLElement {
     const base = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "group";
     const id = ArrangeGridCard.freeId(base, target._config.cards.map((c) => c.id));
     session.moves.push({ add: target._pathFromRoot(), id });
+    lead._arrCfgStep(session);
     session.gone = lead._goneAll();
     lead._resumeSave(session);
     lead._arrExit("save", true);
     const ok = await target._addGroup(name, id);
     if (!ok) {
       session.moves.pop();
+      (session.undo || []).pop();
       lead._resumeSave(null);
     }
     return ok;
@@ -838,7 +853,7 @@ class ArrangeGridCard extends HTMLElement {
   _resumeSave(session) {
     try {
       const key = RESUME_KEY + this._config.name;
-      if (session) sessionStorage.setItem(key, JSON.stringify({ at: Date.now(), moves: session.moves, snap: session.snap, gone: session.gone || {} }));
+      if (session) sessionStorage.setItem(key, JSON.stringify({ ...session, at: Date.now(), gone: session.gone || {} }));
       else sessionStorage.removeItem(key);
     } catch (err) {}
   }
@@ -855,7 +870,7 @@ class ArrangeGridCard extends HTMLElement {
   _resumeTake() {
     const s = this._resumePeek();
     this._resumeSave(null);
-    return s ? { moves: s.moves, snap: s.snap || null, gone: s.gone || {} } : null;
+    return s ? { ...s, snap: s.snap || null, gone: s.gone || {} } : null;
   }
 
   // Cancel, after cards changed groups: the arrangements go back to what
@@ -884,31 +899,37 @@ class ArrangeGridCard extends HTMLElement {
     };
     ArrangeGridCard._saving = (ArrangeGridCard._saving || Promise.resolve()).then(run, run);
     await ArrangeGridCard._saving;
+    if (!session.moves.length) return; // (every card is in its group already)
     try {
       await this._dashEdit((page, down) => {
-        for (const m of [...session.moves].reverse()) {
-          if (m.add) {
-            // (a group made while arranging: gone again, unless it has cards after all)
-            const into = down(m.add);
-            const at = into && Array.isArray(into.cards) ? into.cards.findIndex((c) => String(c.id) === String(m.id)) : -1;
-            if (at >= 0 && !(into.cards[at].cards || []).length) into.cards.splice(at, 1);
-            continue;
-          }
-          const [to, from] = [down(m.to), down(m.from)];
-          const i = to && Array.isArray(to.cards) ? to.cards.findIndex((c) => String(c.id) === String(m.id)) : -1;
-          if (i < 0 || !from || !Array.isArray(from.cards)) continue;
-          let [card] = to.cards.splice(i, 1);
-          if (m.orig == null) {
-            const { id, ...rest } = card;
-            card = rest;
-          } else card = { ...card, id: m.orig };
-          from.cards.splice(Math.min(m.at, from.cards.length), 0, card);
-        }
+        for (const m of [...session.moves].reverse()) ArrangeGridCard.unmove(down, m);
       });
       this._note("Cancelled: the groups and their cards are as they were", 4000);
     } catch (err) {
       this._note("Couldn't put the cards back in their groups: move them back with a card's \"Move to…\".", 9000);
     }
+  }
+
+  // Takes back one change made to the dashboard while arranging (`m`, of
+  // the Arrange's journal): a card back in its group, or a card or group
+  // that was added gone again.
+  static unmove(down, m) {
+    if (m.add) {
+      // (a group made while arranging: gone again, unless it has cards after all)
+      const into = down(m.add);
+      const at = into && Array.isArray(into.cards) ? into.cards.findIndex((c) => String(c.id) === String(m.id)) : -1;
+      if (at >= 0 && !(into.cards[at].cards || []).length) into.cards.splice(at, 1);
+      return;
+    }
+    const [to, from] = [down(m.to), down(m.from)];
+    const i = to && Array.isArray(to.cards) ? to.cards.findIndex((c) => String(c.id) === String(m.id)) : -1;
+    if (i < 0 || !from || !Array.isArray(from.cards)) return;
+    let [card] = to.cards.splice(i, 1);
+    if (m.orig == null) {
+      const { id, ...rest } = card;
+      card = rest;
+    } else card = { ...card, id: m.orig };
+    from.cards.splice(Math.min(m.at, from.cards.length), 0, card);
   }
 
   // A new, empty group among this grid's cards, written into the dashboard.
@@ -1157,9 +1178,13 @@ class ArrangeGridCard extends HTMLElement {
     return (a && a.list) || (b && b.list) || [];
   }
 
-  _hidden() {
+  _hiddenKept() {
     const [a, b] = [this._own(), this._base()];
-    const hidden = (a && a.hidden) || (b && b.hidden) || [];
+    return (a && a.hidden) || (b && b.hidden) || [];
+  }
+
+  _hidden() {
+    const hidden = this._hiddenKept();
     // (with what was dropped on the bin while arranging, until Done or Cancel)
     return this._arrGone && this._arrGone.length ? [...new Set([...hidden, ...this._arrGone])] : hidden;
   }
@@ -1409,7 +1434,7 @@ class ArrangeGridCard extends HTMLElement {
   // the dashboard (`default_layout`), for everyone. That takes a dashboard
   // kept by Home Assistant's UI and a user who may edit it; when it cannot
   // be done, the layout is shown to copy into the config by hand.
-  async _storeConfig(arr) {
+  async _storeConfig(arr, act) {
     const strip = (c) => {
       const { default_layout, ...rest } = c;
       return JSON.stringify(rest);
@@ -1433,7 +1458,7 @@ class ArrangeGridCard extends HTMLElement {
       if (arr) found.default_layout = arr;
       else delete found.default_layout;
       await this._hass.callWS({ type: "lovelace/config/save", url_path, config: conf });
-      this._note(arr ? "Arrangement saved to the dashboard" : "Arrangement removed from the dashboard", 3000);
+      this._rootGrid()._note(arr ? "Arrangement saved to the dashboard" : "Arrangement removed from the dashboard, for everyone", act ? 20000 : 3000, act);
     } catch (err) {
       this._showCopy(arr);
     }
@@ -1459,10 +1484,11 @@ class ArrangeGridCard extends HTMLElement {
   }
 
   // Keeps `next` (null: nothing of the user's own) as the record that counts.
-  _commit(next, quiet) {
+  // `act`: something to offer with what is said about it ({label, fn}).
+  _commit(next, quiet, act) {
     if (this._config.storage === "config") {
       this._cfgOver = next;
-      this._storeConfig(next);
+      this._storeConfig(next, act);
     } else {
       this._arr = next;
       this._store(next, quiet);
@@ -1506,14 +1532,158 @@ class ArrangeGridCard extends HTMLElement {
     return !!(user && user.is_admin);
   }
 
-  _note(text, ms) {
+  // Something said in the bar for a while; `act`: with a button ({label, fn}).
+  _note(text, ms, act) {
     if (!this._bar || this._arranging) return;
     clearTimeout(this._noteTimer);
-    this._bar.replaceChildren(make("span", "", text));
+    const parts = [make("span", "", text)];
+    if (act) {
+      const b = make("button", "", act.label);
+      b.onclick = () => {
+        clearTimeout(this._noteTimer);
+        this._bar.hidden = true;
+        act.fn();
+      };
+      parts.push(b);
+    }
+    this._bar.replaceChildren(...parts);
     this._bar.hidden = false;
     this._noteTimer = setTimeout(() => {
       if (!this._arranging) this._bar.hidden = true;
     }, ms);
+  }
+
+  // -------------------------------------------- previous arrangements
+  //
+  // Before an arrangement is reset, restored, or changed by an Arrange, what
+  // it was is kept: the last few for each page (PREV_KEEP), with the user's
+  // own data in Home Assistant, so that it can be brought back after a
+  // reload and from another device. This browser keeps a copy as well, for
+  // when Home Assistant does not take it. One of them:
+  //   {at: ms, why: "reset" | "arrange" | "restore",
+  //    layouts: {name: record | null}, defaults: {name: record | null}}
+  // `layouts`: the user's own, by layout name (the page's and its groups');
+  // `defaults`: those kept in the dashboard for everyone (`storage: config`).
+
+  // What `grids` are arranged as now. `live`: while arranging, as Done
+  // would keep what is on screen.
+  _prevSnap(grids, live) {
+    const snap = { layouts: {}, defaults: {} };
+    for (const g of grids) {
+      const touched = live && g._arranging && ((g._arrGone && g._arrGone.length) || JSON.stringify([g._arrEdit, g._arrListEdit]) !== g._arrStart);
+      const rec = touched ? g._arrNext("save", null) : g._own();
+      (g._config.storage === "config" ? snap.defaults : snap.layouts)[g._config.name] = rec || null;
+    }
+    return snap;
+  }
+
+  _prevLocal() {
+    try {
+      const list = JSON.parse(localStorage.getItem(PREV_KEY + this._rootGrid()._config.name) || "[]");
+      return Array.isArray(list) ? list.filter(ArrangeGridCard.prevOk) : [];
+    } catch (err) {
+      return [];
+    }
+  }
+
+  static prevOk(e) {
+    return !!e && typeof e === "object" && typeof e.at === "number" && !!e.layouts && typeof e.layouts === "object";
+  }
+
+  // Keeps `snap` as the newest previous arrangement of the page. Null when
+  // there is nothing in it to lose.
+  _prevKeep(why, snap) {
+    const [layouts, defaults] = [snap.layouts || {}, snap.defaults || {}];
+    if (![...Object.values(layouts), ...Object.values(defaults)].some(Boolean)) return null;
+    const at = (ArrangeGridCard._prevAt = Math.max(Date.now(), (ArrangeGridCard._prevAt || 0) + 1));
+    const entry = { at, why, layouts };
+    if (Object.keys(defaults).length) entry.defaults = defaults;
+    const root = this._rootGrid();
+    const page = root._config.name;
+    try {
+      localStorage.setItem(PREV_KEY + page, JSON.stringify([entry, ...root._prevLocal()].slice(0, PREV_KEEP)));
+    } catch (err) {}
+    const run = async () => {
+      try {
+        const res = await root._hass.callWS({ type: "frontend/get_user_data", key: USER_KEY });
+        const all = res && res.value && typeof res.value === "object" ? res.value : {};
+        const previous = { ...(all.previous && typeof all.previous === "object" ? all.previous : {}) };
+        const list = Array.isArray(previous[page]) ? previous[page].filter(ArrangeGridCard.prevOk) : [];
+        previous[page] = [entry, ...list.filter((e) => e.at !== at)].slice(0, PREV_KEEP);
+        await root._hass.callWS({ type: "frontend/set_user_data", key: USER_KEY, value: { ...all, v: 1, previous } });
+      } catch (err) {}
+    };
+    ArrangeGridCard._saving = (ArrangeGridCard._saving || Promise.resolve()).then(run, run);
+    return entry;
+  }
+
+  // The page's previous arrangements, the newest first: Home Assistant's,
+  // and this browser's where Home Assistant has not got them.
+  async _prevList() {
+    const root = this._rootGrid();
+    let server = [];
+    try {
+      await (ArrangeGridCard._saving || Promise.resolve());
+      const res = await root._hass.callWS({ type: "frontend/get_user_data", key: USER_KEY });
+      const list = res && res.value && res.value.previous && res.value.previous[root._config.name];
+      if (Array.isArray(list)) server = list.filter(ArrangeGridCard.prevOk);
+    } catch (err) {}
+    const local = root._prevLocal().filter((e) => !server.some((s) => s.at === e.at));
+    return [...server, ...local].sort((a, b) => b.at - a.at).slice(0, PREV_KEEP);
+  }
+
+  static prevLabel(e) {
+    const why = { reset: "Before the reset", arrange: "Before arranging", restore: "Before restoring" }[e.why] || "Earlier";
+    let when = "";
+    try {
+      when = new Date(e.at).toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+    } catch (err) {}
+    const n = Object.keys(e.layouts || {}).length + Object.keys(e.defaults || {}).length;
+    return `${why}${when ? ` · ${when}` : ""}${n > 1 ? ` · ${n} grids` : ""}`;
+  }
+
+  // Brings a previous arrangement back, for every grid of the page it was
+  // kept for that is still there. What is replaced is kept in its turn.
+  _prevRestore(entry) {
+    const root = this._rootGrid();
+    if (root._tree().some((g) => g._arranging)) return;
+    const of = (g) => (g._config.storage === "config" ? entry.defaults : entry.layouts) || {};
+    const grids = root._tree().filter((g) => g._config.name in of(g) && g._canArrange());
+    if (!grids.length) return root._note("None of the grids that arrangement was for are on the page any more.", 6000);
+    const back = root._prevKeep("restore", root._prevSnap(grids));
+    const act = back ? { label: "Undo", fn: () => root._prevRestore(back) } : null;
+    for (const g of grids) g._commit(Layout.valid(of(g)[g._config.name]), true, act);
+    root._note("The previous arrangement is back.", 20000, act);
+  }
+
+  // Forgets the arrangement of `grids` (this one's, or its groups' too),
+  // keeping what it was.
+  _resetNow(grids) {
+    const root = this._rootGrid();
+    grids = grids.filter((g) => g._own() && g._canArrange());
+    if (!grids.length) return;
+    const entry = root._prevKeep("reset", root._prevSnap(grids));
+    const act = root._resetAct(entry);
+    for (const g of grids) g._commit(null, true, act);
+    root._note("The arrangement is reset.", 20000, act);
+  }
+
+  _resetAct(entry) {
+    return entry ? { label: "Undo reset", fn: () => this._prevRestore(entry) } : null;
+  }
+
+  // What a reset loses, and for whom, in words.
+  _resetWords(grids, part) {
+    const groups = grids.length - 1;
+    const config = grids.filter((g) => g._config.storage === "config").length;
+    const where = `${grids[0]._outerGrid() ? "this group" : "the page"}${groups > 0 ? ` and ${groups === 1 ? "the group" : `the ${groups} groups`} in it` : ""}`;
+    const what = part === "grid" ? "where every card is on the wide grid, and its size" : part === "list" ? "the order of the list" : "places, sizes, the list's order, what is hidden and what is folded";
+    const whose = config === grids.length
+      ? "This is the arrangement kept in the dashboard: it is removed for everyone."
+      : config
+        ? "Part of this is kept in the dashboard and is removed for everyone; the rest is your own, and other people keep theirs."
+        : "Only your own arrangement is forgotten: other people keep theirs, and the cards themselves stay.";
+    return `This resets ${where}: ${what} go${part === "list" ? "es" : ""} back to the default. ${whose}`;
   }
 
   // ------------------------------------------------------------- menu
@@ -1588,6 +1758,7 @@ class ArrangeGridCard extends HTMLElement {
         return el;
       },
       hr: () => document.createElement("hr"),
+      note: (text) => make("span", "note", text),
       // another set of items in the same menu
       show: (again) => {
         menu.replaceChildren(...again(kit));
@@ -1677,6 +1848,28 @@ class ArrangeGridCard extends HTMLElement {
     const places = (src, k) => (kit) => [kit.head(`Move ${k.name} to`), ...src._moveTargets(k).map((t) => kit.item(t.label, () => src._moveCard(k, t.grid)))];
     const newGroup = (kit) => this._groupField(kit, nest ? `New group in ${this._config.title || "this group"}` : "New group on the page", (title) => this._addGroup(title));
     const moves = this._mayMove() && this._rootGrid()._kids.some((k) => k.el.localName === TAG);
+    // Reset asks first, and says what goes; what it was can be brought back
+    const tree = this._tree();
+    const resetAsk = (kit) => [
+      kit.head("Reset layout?"),
+      kit.note(`${this._resetWords(tree)} It can be brought back afterwards with "Restore a previous arrangement…" in this menu.`),
+      kit.item("Keep it as it is", () => {}),
+      kit.item(tree.length > 1 ? `Reset ${nest ? "this group and its groups" : "the whole page"}` : "Reset", () => this._resetNow(tree), { disabled: !tree.some((g) => g._own()) }),
+      ...(tree.length > 1 ? [kit.item(`Reset only ${nest ? "this group's own grid" : "the page's own grid"}, not the groups in it`, () => this._resetNow([this]), { disabled: !this._own() })] : []),
+    ];
+    const restore = (kit) => {
+      const menu = this._menu;
+      const wait = [kit.head("Restore a previous arrangement"), kit.note("Looking…")];
+      this._prevList().then((list) => {
+        if (this._menu !== menu) return;
+        kit.show((k) => [
+          k.head("Restore a previous arrangement"),
+          k.note(list.length ? `The last ${PREV_KEEP} are kept, with your own data in Home Assistant. What is on the page now is kept in its turn.` : "Nothing is kept yet: an arrangement is kept when it is reset or changed in Arrange."),
+          ...list.map((e) => k.item(ArrangeGridCard.prevLabel(e), () => this._prevRestore(e))),
+        ]);
+      });
+      return wait;
+    };
     const common = (kit) => [
       kit.item(nest ? "Arrange inside this group…" : "Arrange…", () => this._arrEnter(), { disabled: !may || !on.length }),
       ...(nest ? [kit.item("Hide this group", () => nest._setHidden(nest._kidOf(this).key, true), { disabled: !nest._canArrange() }), kit.item("Arrange the whole page…", () => this._rootGrid()._arrEnter(), { disabled: !nest._canArrange() }),
@@ -1690,7 +1883,8 @@ class ArrangeGridCard extends HTMLElement {
           ]
         : []),
       // (everything of the user's own: places, sizes, the list's order, what is hidden)
-      kit.item("Reset layout", () => this._commit(null), { disabled: !may || !this._own() }),
+      kit.item("Reset layout…", () => kit.show(resetAsk), { stay: true, disabled: !may || !tree.some((g) => g._own()) }),
+      kit.item("Restore a previous arrangement…", () => kit.show(restore), { stay: true, disabled: !may }),
       ...(may ? [] : [kit.hr(), kit.item("Only an administrator can arrange this page", () => {}, { disabled: true })]),
     ];
     this._menuOpen(
@@ -1772,7 +1966,7 @@ class ArrangeGridCard extends HTMLElement {
     this._undo = make("div", "undo");
     this._undo.hidden = true;
     this._arrGone = [];
-    this._arrBack = null;
+    this._ask = null;
     if (!this._trash) {
       this._trash = make("div", "trash");
       this._trash.setAttribute("aria-hidden", "true");
@@ -1786,13 +1980,39 @@ class ArrangeGridCard extends HTMLElement {
       if (this._arrLead._bar) this._arrLead._bar.appendChild(this._undo);
       return;
     }
-    this._bar.replaceChildren(make("span", "", hint), ...extra, exit("Done", "save", true), exit("Reset", "reset"), exit("Cancel", "cancel"), this._undo, this._why);
+    const step = (label, title, fn) => {
+      const b = make("button", "", label);
+      b.title = title;
+      b.disabled = true;
+      b.onclick = fn;
+      return b;
+    };
+    this._undoBtn = step("Undo", "Take back the last change (Ctrl+Z)", () => this._arrUndoStep());
+    this._redoBtn = step("Redo", "Do again what Undo took back (Ctrl+Shift+Z)", () => this._arrRedoStep());
+    // (Reset is apart from Done and Cancel, and asks first)
+    const reset = make("button", "quiet", "Reset…");
+    reset.title = "Go back to the default arrangement";
+    reset.onclick = () => this._arrAskReset();
+    this._bar.replaceChildren(make("span", "", hint), ...extra, this._undoBtn, this._redoBtn, exit("Done", "save", true), exit("Cancel", "cancel"), reset, this._undo, this._why);
     this._bar.hidden = false;
     this._btn.classList.add("on");
-    // Esc leaves without keeping anything
+    // Esc leaves without keeping anything; Ctrl/Cmd+Z takes back a step
+    // (Shift with it, or Ctrl+Y: does it again)
     this._arrKey = (ev) => {
-      if (ev.key !== "Escape" || this._tree().some((g) => g._menu || g._arrBusy)) return;
+      const held = this._tree().some((g) => g._menu || g._arrBusy);
+      const key = String(ev.key || "").toLowerCase();
+      if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && (key === "z" || key === "y")) {
+        const t = (ev.composedPath ? ev.composedPath() : [])[0];
+        if (held || (t && (t.localName === "input" || t.localName === "textarea" || t.isContentEditable))) return;
+        ev.preventDefault();
+        ev.stopPropagation();
+        if (key === "z" && !ev.shiftKey) this._arrUndoStep();
+        else this._arrRedoStep();
+        return;
+      }
+      if (ev.key !== "Escape" || held) return;
       ev.stopPropagation();
+      if (this._ask) return this._arrAskDrop();
       this._arrExit("cancel");
     };
     window.addEventListener("keydown", this._arrKey, true);
@@ -1828,6 +2048,185 @@ class ArrangeGridCard extends HTMLElement {
       this._arrSession.snap = {};
       for (const g of this._tree()) if (g._config.storage === "user") this._arrSession.snap[g._config.name] = g._arr || null;
     }
+    // (and to keep as the previous arrangement once Done changes it)
+    if (!this._arrLead && !this._arrSession.prev) this._arrSession.prev = this._prevSnap(this._tree());
+    (this._arrLead || this)._arrJoined(this);
+  }
+
+  // ------------------------------------------------- undo and redo
+  //
+  // One history for the whole Arrange, kept by the grid it was started on:
+  // every step (a move, a resize, a column or row, a card in the bin, a new
+  // order) can be taken back and done again, whichever grid it was in. A
+  // step is what the page and its groups were arranged as before it:
+  //   {state: JSON of {name: {edit, list, gone, asked}}, cfg}
+  // `cfg`: the step also changed the dashboard (a card changed groups, or a
+  // card or group was added): taking it back rewrites the dashboard again,
+  // and such a step is not done again by Redo.
+
+  _arrState() {
+    const out = {};
+    for (const g of this._tree()) {
+      if (!g._arranging) continue;
+      const e = g._arrEdit;
+      out[g._config.name] = {
+        edit: e ? { grid: { cols: e.grid.cols, rows: e.grid.rows }, tiles: e.tiles.map(({ id, c, r, w, h }) => ({ id, c, r, w, h })) } : null,
+        list: g._arrListEdit ? [...g._arrListEdit] : null,
+        gone: [...(g._arrGone || [])],
+        asked: g._arrRowsAsked || null,
+      };
+    }
+    return out;
+  }
+
+  // A grid has opened for this Arrange (the lead itself, or a group, which
+  // after a redraw may come later): what a step taken back across a redraw
+  // left for it is put in place, and the history goes on from here.
+  _arrJoined(grid) {
+    const s = this._arrSession;
+    if (!s) return;
+    s.undo = Array.isArray(s.undo) ? s.undo : [];
+    s.redo = Array.isArray(s.redo) ? s.redo : [];
+    const mine = s.pending && s.pending[grid._config.name];
+    if (mine) {
+      delete s.pending[grid._config.name];
+      if (grid._arrTake(mine)) grid._layout();
+    }
+    s.now = JSON.stringify(this._arrState());
+    this._arrHistSync();
+  }
+
+  // After something was done: a step, if anything changed.
+  _arrStep() {
+    const lead = this._arrLead || this;
+    const s = lead._arrSession;
+    // (not in the middle of a drag: the spare row under the pointer is no step)
+    if (!lead._arranging || !s || !Array.isArray(s.undo) || lead._arrSpareGrid) return;
+    const now = JSON.stringify(lead._arrState());
+    if (now === s.now) return;
+    s.undo.push({ state: s.now });
+    if (s.undo.length > UNDO_KEEP) s.undo.shift();
+    s.redo = [];
+    s.pending = null;
+    s.now = now;
+    lead._arrHistSync();
+  }
+
+  // A step that changes the dashboard is about to be taken (the Arrange
+  // pauses for the redraw).
+  _arrCfgStep(session) {
+    session.undo = Array.isArray(session.undo) ? session.undo : [];
+    session.undo.push({ state: session.now, cfg: true });
+    if (session.undo.length > UNDO_KEEP) session.undo.shift();
+    session.redo = [];
+    session.pending = null;
+    session.saved = true;
+  }
+
+  _arrHistSync() {
+    const s = this._arrSession;
+    if (this._undoBtn) this._undoBtn.disabled = !(s && s.undo && s.undo.length);
+    if (this._redoBtn) this._redoBtn.disabled = !(s && s.redo && s.redo.length);
+  }
+
+  // One grid's part of a state. Not taken when it is not about the cards
+  // that are here now.
+  _arrTake(st) {
+    if (!this._arranging || !st) return false;
+    const keys = this._kids.map((k) => k.key);
+    const out = new Set([...this._hiddenKept(), ...(st.gone || [])]);
+    if (this._arrEdit) {
+      if (!st.edit || !st.edit.tiles.every((t) => keys.includes(t.id)) || keys.some((key) => !out.has(key) && !st.edit.tiles.some((t) => t.id === key))) return false;
+      this._arrEdit = { grid: { ...st.edit.grid }, tiles: st.edit.tiles.map((t) => ({ ...t })) };
+    }
+    if (this._arrListEdit) {
+      if (!st.list || !st.list.every((key) => keys.includes(key)) || keys.some((key) => !out.has(key) && !st.list.includes(key))) return false;
+      this._arrListEdit.splice(0, this._arrListEdit.length, ...st.list);
+    }
+    this._arrGone = (st.gone || []).filter((key) => keys.includes(key));
+    this._arrRowsAsked = st.asked || null;
+    if (this._arrSel && this._arrGone.includes(this._arrSel)) this._arrSelect(null);
+    this._arrBackDrop();
+    return true;
+  }
+
+  _arrApply(state) {
+    const st = JSON.parse(state);
+    const tree = this._tree();
+    for (const g of tree) g._arrTake(st[g._config.name]);
+    for (const g of tree.reverse()) if (g._arranging) g._layout();
+    this._arrWhy("");
+  }
+
+  _arrUndoStep() {
+    const lead = this._arrLead || this;
+    const s = lead._arrSession;
+    if (!lead._arranging || !s || !s.undo || !s.undo.length || lead._tree().some((g) => g._arrBusy)) return;
+    const e = s.undo.pop();
+    if (e.cfg) return lead._arrUndoCfg(e);
+    s.redo.push({ state: JSON.stringify(lead._arrState()) });
+    s.now = e.state;
+    lead._arrApply(e.state);
+    lead._arrHistSync();
+  }
+
+  _arrRedoStep() {
+    const lead = this._arrLead || this;
+    const s = lead._arrSession;
+    if (!lead._arranging || !s || !s.redo || !s.redo.length || lead._tree().some((g) => g._arrBusy)) return;
+    const e = s.redo.pop();
+    s.undo.push({ state: JSON.stringify(lead._arrState()) });
+    s.now = e.state;
+    lead._arrApply(e.state);
+    lead._arrHistSync();
+  }
+
+  // Takes back a step that changed the dashboard: the dashboard is changed
+  // back (which redraws the page), and when Arrange opens again everything
+  // is put where it was before the step.
+  async _arrUndoCfg(e) {
+    const s = this._arrSession;
+    const m = s.moves.pop();
+    if (!m) {
+      s.now = e.state;
+      this._arrApply(e.state);
+      return this._arrHistSync();
+    }
+    s.redo = [];
+    s.pending = JSON.parse(e.state);
+    s.gone = {};
+    s.saved = true;
+    this._resumeSave(s);
+    this._arrExit("save", true);
+    try {
+      await this._dashEdit((page, down) => ArrangeGridCard.unmove(down, m));
+    } catch (err) {
+      this._resumeSave(null);
+      this._note("Couldn't take that back in the dashboard. Arrange is closed with everything else kept: move the card back with its \"Move to…\".", 9000);
+    }
+  }
+
+  // Reset, in the bar: asks first, and says what goes and for whom.
+  _arrAskReset() {
+    if (this._ask) return this._arrAskDrop();
+    const keep = make("button", "", "Keep arranging");
+    keep.onclick = () => this._arrAskDrop();
+    const go = make("button", "danger", "Reset");
+    go.onclick = () => this._arrExit("reset");
+    this._ask = make("div", "ask");
+    this._ask.setAttribute("role", "alertdialog");
+    this._ask.append(
+      make("span", "", `${this._resetWords(this._tree(), this._arrMode === "list" ? "list" : "grid")} What you changed in this Arrange goes with it. ${this._arrMode === "list" ? "The wide grid is" : "What is hidden and the list's order are"} left alone. It can be taken back: "Undo reset" right after, or "Restore a previous arrangement…" in the menu later.`),
+      keep,
+      go
+    );
+    this._bar.appendChild(this._ask);
+    keep.focus();
+  }
+
+  _arrAskDrop() {
+    if (this._ask) this._ask.remove();
+    this._ask = null;
   }
 
   // This grid and every group in it, however deep.
@@ -1957,6 +2356,9 @@ class ArrangeGridCard extends HTMLElement {
       top._arrDel.push({ grid: this, path: this._pathFromRoot(), keys: binned, at, types: at.map((i) => this._config.cards[i].type) });
     }
     const [sub, session] = [!!this._arrLead, this._arrSession];
+    // Reset: what is on screen is kept first, to bring back
+    const lost = how === "reset" && !sub && !kept ? this._rootGrid()._prevKeep("reset", this._prevSnap(this._tree(), true)) : null;
+    if (!sub) this._arrLost = lost;
     // (a group nobody touched keeps no arrangement of its own for it)
     if (sub && how === "save" && !(this._arrGone && this._arrGone.length) && JSON.stringify([this._arrEdit, this._arrListEdit]) === this._arrStart) how = "cancel";
     for (const kid of this._kids) if (kid.el.localName === TAG && kid.el._arranging && kid.el._arrLead) kid.el._arrExit(how, true);
@@ -1968,12 +2370,12 @@ class ArrangeGridCard extends HTMLElement {
     if (!sub && !kept) {
       this._resumeSave(null);
       // (cards that changed groups go back, with everything as it was)
-      if (how === "cancel" && session && session.moves.length) this._arrRevert(session);
+      if (how === "cancel" && session && (session.moves.length || session.saved)) this._arrRevert(session);
     }
-    const [edit, listEdit, mode] = [this._arrEdit, this._arrListEdit, this._arrMode];
     const gone = binned && !deletes ? this._hidden() : null;
+    const next = how === "save" || how === "reset" ? this._arrNext(how, gone) : null;
     this._arranging = false;
-    this._arrEdit = this._arrListEdit = this._arrMode = this._arrCount = this._arrSel = this._arrGone = this._arrBack = null;
+    this._arrEdit = this._arrListEdit = this._arrMode = this._arrCount = this._arrSel = this._arrGone = this._ask = this._undoBtn = this._redoBtn = null;
     this._trashShow(false);
     this._scrollStop();
     window.removeEventListener("keydown", this._arrKey, true);
@@ -1987,33 +2389,57 @@ class ArrangeGridCard extends HTMLElement {
     }
     this._bar.hidden = true;
     this._btn.classList.remove("on");
-    if (how === "save" || how === "reset") {
-      const had = this._own() || { tiles: [] };
-      const next = { tiles: [] };
-      if (mode === "list") {
-        if (had.grid) {
-          next.grid = had.grid;
-          next.tiles = had.tiles;
-        }
-        if (how === "save" && listEdit) next.list = listEdit;
-      } else {
-        if (how === "save" && edit) {
-          // without the empty rows under the last card; a hidden card keeps its place
-          next.grid = { cols: edit.grid.cols, rows: Layout.bottom(edit.tiles) };
-          next.tiles = [...edit.tiles, ...(had.tiles || []).filter((t) => !edit.tiles.some((e) => e.id === t.id))];
-        }
-        if (had.list) next.list = had.list;
-      }
-      if (gone) next.hidden = gone;
-      else if (had.hidden) next.hidden = had.hidden;
-      if (had.folded) next.folded = had.folded;
-      this._commit(next.grid || next.list || next.hidden || next.folded ? next : null, sub || !!(this._arrDel && this._arrDel.length));
-    } else this._layout();
+    if (how === "save" || how === "reset") this._commit(next, sub || how === "reset" || !!(this._arrDel && this._arrDel.length), how === "reset" ? this._rootGrid()._resetAct(top._arrLost) : null);
+    else this._layout();
     if (!sub) {
       const del = this._arrDel || [];
       this._arrDel = null;
       if (del.length) this._arrDelete(del);
+      // Done: what the page was arranged as when Arrange was opened is kept
+      // (if anything was done in it)
+      if (how === "save" && !kept && session && session.prev && ((session.undo && session.undo.length) || session.saved)) this._prevKeepIfChanged(session.prev);
+      if (how === "reset" && !kept) this._rootGrid()._note("The arrangement is reset.", 20000, this._rootGrid()._resetAct(lost));
+      this._arrLost = null;
     }
+  }
+
+  // What Done ("save") or Reset keeps of this grid: null, nothing of its own.
+  _arrNext(how, gone) {
+    const [edit, listEdit, mode] = [this._arrEdit, this._arrListEdit, this._arrMode];
+    const had = this._own() || { tiles: [] };
+    const next = { tiles: [] };
+    if (mode === "list") {
+      if (had.grid) {
+        next.grid = had.grid;
+        next.tiles = had.tiles;
+      }
+      if (how === "save" && listEdit) next.list = [...listEdit];
+    } else {
+      if (how === "save" && edit) {
+        // without the empty rows under the last card; a hidden card keeps its place
+        next.grid = { cols: edit.grid.cols, rows: Layout.bottom(edit.tiles) };
+        next.tiles = [...edit.tiles, ...(had.tiles || []).filter((t) => !edit.tiles.some((e) => e.id === t.id))];
+      }
+      if (had.list) next.list = had.list;
+    }
+    if (gone) next.hidden = gone;
+    else if (had.hidden) next.hidden = had.hidden;
+    if (had.folded) next.folded = had.folded;
+    return next.grid || next.list || next.hidden || next.folded ? next : null;
+  }
+
+  // `prev`: a snapshot of when Arrange was opened. Kept as a previous
+  // arrangement if any grid in it is arranged differently now.
+  _prevKeepIfChanged(prev) {
+    const root = this._rootGrid();
+    const tree = root._tree();
+    const same = ["layouts", "defaults"].every((part) =>
+      Object.keys(prev[part] || {}).every((name) => {
+        const g = tree.find((x) => x._config.name === name && (x._config.storage === "config") === (part === "defaults"));
+        return !g || JSON.stringify(g._own() || null) === JSON.stringify(prev[part][name] || null);
+      })
+    );
+    if (!same) root._prevKeep("arrange", prev);
   }
 
   // Selects a group (by its heading's key; null: none). While one is
@@ -2132,6 +2558,7 @@ class ArrangeGridCard extends HTMLElement {
     const n = typeof kid.el._groupRows === "function" ? kid.el._groupRows(live) : null;
     if (!t || !n || n === t.h) return;
     this._arrGrow(t, n);
+    if (say) this._arrStep();
   }
 
   // A card made as tall as it needs. Taller than there is room for: what
@@ -2188,6 +2615,7 @@ class ArrangeGridCard extends HTMLElement {
     this._arrWhy("");
     this._arrBackDrop();
     this._layout();
+    this._arrStep();
   }
 
   // While a card is dragged, the one grid the pointer is over has an empty
@@ -2337,34 +2765,21 @@ class ArrangeGridCard extends HTMLElement {
     if (!this._arranging || !kids.length) return;
     const keys = kids.map((k) => k.key);
     const [e, list] = [this._arrEdit, this._arrListEdit];
-    const back = { gone: [...this._arrGone], sel: this._arrSel, edit: e && { grid: { ...e.grid }, tiles: e.tiles.map((t) => ({ ...t })) }, list: list && [...list] };
     this._arrGone.push(...keys);
     if (e) e.tiles = e.tiles.filter((t) => !keys.includes(t.id));
     if (list) list.splice(0, list.length, ...list.filter((key) => !keys.includes(key)));
     if (this._arrSel && keys.includes(this._arrSel)) this._arrSelect(null);
     this._arrWhy("");
     this._layout();
-    // (offered until something else is changed)
-    this._arrBack = back;
+    this._arrStep();
+    // (said until something else is changed; the Undo is the bar's own)
     const undo = make("button", "", "Undo");
-    undo.onclick = () => this._arrUndo();
+    undo.onclick = () => this._arrUndoStep();
     this._undo.replaceChildren(make("span", "", `${kids.length === 1 ? kids[0].name : `${kids.length} cards`} ${this._arrDeletes() ? "will be deleted when you press Done." : "will be hidden when you press Done."}`), undo);
     this._undo.hidden = false;
   }
 
-  _arrUndo() {
-    const b = this._arrBack;
-    if (!b || !this._arranging) return;
-    this._arrGone = b.gone;
-    if (b.edit) this._arrEdit = b.edit;
-    if (b.list && this._arrListEdit) this._arrListEdit.splice(0, this._arrListEdit.length, ...b.list);
-    this._arrBackDrop();
-    this._layout();
-    if (b.sel) this._arrSelect(b.sel);
-  }
-
   _arrBackDrop() {
-    this._arrBack = null;
     if (this._undo) {
       this._undo.replaceChildren();
       this._undo.hidden = true;
@@ -2588,6 +3003,7 @@ class ArrangeGridCard extends HTMLElement {
         settle(ev, drop);
       } finally {
         this._arrSpareAt(null);
+        this._arrStep();
       }
     };
     const settle = (ev, drop) => {
@@ -2641,6 +3057,7 @@ class ArrangeGridCard extends HTMLElement {
       if (group && !ev.shiftKey) this._shiftGroup(group, d[0], d[1]);
       else if (ev.shiftKey) this._sizeTo(kid, t.w + d[0], t.h + d[1]);
       else this._moveTo(kid, t.c + d[0], t.r + d[1]);
+      this._arrStep();
     });
     // (a click on the card under it would do what the card does)
     el.addEventListener("click", (ev) => ev.stopPropagation());
@@ -2659,6 +3076,7 @@ class ArrangeGridCard extends HTMLElement {
     list.splice(0, list.length, ...rest);
     this._arrBackDrop();
     this._layout();
+    this._arrStep();
   }
 
   _arrBlock(kid) {
@@ -2796,6 +3214,7 @@ const EDITOR_STYLE = `
   button.main { border-color: var(--primary-color); }
   .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
   .tools .title { flex: 1 1 auto; font-weight: 600; color: var(--primary-text-color); }
+  .tools.ask .title { flex-basis: 100%; font-weight: 400; }
   textarea { width: 100%; min-height: 220px; box-sizing: border-box; font: 13px/1.4 var(--ha-font-family-code, monospace);
     color: var(--primary-text-color); background: var(--secondary-background-color, #000); border: 1px solid var(--divider-color, #444); border-radius: 8px; padding: 8px; }
   .err { color: var(--error-color, #f87171); font-size: 13px; }
@@ -2904,14 +3323,21 @@ class ArrangeGridCardEditor extends HTMLElement {
     adds.append(add, group);
     this._saved = make("p", "saved");
     const use = make("button", "use", "Use my arrangement as the default");
-    use.onclick = () => this._useMine();
-    this._drop = make("button", "drop", "Remove the default");
-    this._drop.onclick = () => {
-      const { default_layout, ...rest } = this._config;
-      this._fire(rest);
+    // (both change what everyone starts from: each asks first)
+    use.onclick = () => {
+      if (!this._config.default_layout) return this._useMine();
+      this._askFirst("Replace the default arrangement with your own? Everyone who has not arranged this page themselves sees it once the dashboard is saved. The default there is now is lost.", "Replace it", () => this._useMine());
     };
+    this._drop = make("button", "drop", "Remove the default…");
+    this._drop.onclick = () =>
+      this._askFirst("Remove the default arrangement? Once the dashboard is saved, everyone who has not arranged this page themselves sees the cards one after another again. Each user's own arrangement stays.", "Remove it", () => {
+        const { default_layout, ...rest } = this._config;
+        this._fire(rest);
+      });
     const tools = make("div", "tools");
     tools.append(use, this._drop);
+    this._askBox = make("div", "tools ask");
+    this._askBox.hidden = true;
     this._msg = make("p", "err");
     this._main.append(
       make("h3", "", "Cards"),
@@ -2923,6 +3349,7 @@ class ArrangeGridCardEditor extends HTMLElement {
       make("p", "", "The arrangement everyone starts from. Arrange the page yourself first (the button under the grid), then keep that here."),
       this._saved,
       tools,
+      this._askBox,
       this._msg
     );
 
@@ -3114,6 +3541,23 @@ class ArrangeGridCardEditor extends HTMLElement {
   _subSet(value) {
     this._subJson = JSON.stringify(value);
     this._sub.value = value;
+  }
+
+  // A question under the buttons, before something is done for everyone.
+  _askFirst(text, yes, fn) {
+    const close = () => {
+      this._askBox.replaceChildren();
+      this._askBox.hidden = true;
+    };
+    const keep = make("button", "", "Keep it as it is");
+    keep.onclick = close;
+    const go = make("button", "main", yes);
+    go.onclick = () => {
+      close();
+      fn();
+    };
+    this._askBox.replaceChildren(make("span", "title", text), keep, go);
+    this._askBox.hidden = false;
   }
 
   // The arrangement this user has made of the page becomes the config's.

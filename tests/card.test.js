@@ -400,6 +400,8 @@ test("Reset goes back to the config's layout and forgets the user's", async () =
   const card = await mount(three(), { hass });
   click(card._btn);
   click(button(card, "Arrange…"));
+  click(button(card, "Reset…")); // asks first
+  assert.deepEqual(place(card, "a"), { c: 5, r: 0, w: 1, h: 1 });
   click(button(card, "Reset"));
   await tick();
   assert.deepEqual(place(card, "a"), { c: 0, r: 0, w: 1, h: 1 });
@@ -1508,7 +1510,16 @@ test("editor: the user's own arrangement becomes the config's default, and can b
   await tick();
   assert.deepEqual(last().default_layout, mine);
   assert.match(byClass(ed, "saved")[0].textContent, /3 × 1 cells, 1 cards placed/);
-  click(button(ed, "Remove the default"));
+  // both ask before the default everyone starts from is replaced or removed
+  click(button(ed, "Use my arrangement as the default"));
+  await tick();
+  assert.match(byClass(ed, "ask")[0].textContent, /^Replace the default arrangement with your own\?/);
+  click(button(ed, "Keep it as it is"));
+  assert.equal(byClass(ed, "ask")[0].hidden, true);
+  click(button(ed, "Remove the default…"));
+  assert.deepEqual(last().default_layout, mine); // not yet
+  assert.match(byClass(ed, "ask")[0].textContent, /^Remove the default arrangement\?/);
+  click(button(ed, "Remove it"));
   assert.equal("default_layout" in last(), false);
 
   const none = editor({ type: "custom:arrange-grid-card", layout: "other", cards: [] }, hass);
@@ -1535,4 +1546,315 @@ test("editor: without Home Assistant's editors a card is edited as text", async 
   fire(area, "input");
   assert.match(byClass(ed, "err").map((e) => e.textContent).join(""), /Not saved/);
   assert.equal(last().cards[0].entity, "light.q");
+});
+
+// ------------------------------------------------- undo, redo and reset
+
+const open = (card) => {
+  click(card._btn);
+  click(button(card, "Arrange…"));
+};
+const key = (props) => fire(dom.win, "keydown", props);
+const HOME = "/dashboard-test/home";
+
+test("Undo and Redo: every step of an Arrange is taken back and done again, by the bar or Ctrl+Z", async () => {
+  const hass = fakeHass();
+  const card = await mount(three(), { hass });
+  open(card);
+  withBin(card);
+  const [undo, redo] = [button(card, "Undo"), button(card, "Redo")];
+  assert.deepEqual([undo.disabled, redo.disabled], [true, true]);
+  const start = JSON.stringify(card._arrEdit);
+
+  drag(card, "a", at(0, 0), at(6, 2)); // a move
+  fire(kid(card, "b").arr, "keydown", { key: "ArrowDown", shiftKey: true }); // a resize
+  click(all(card, (el) => el.title === "One column more")[0]); // a column
+  drag(card, "c", at(2, 0), bin); // the bin
+  assert.deepEqual([undo.disabled, redo.disabled], [false, true]);
+  const end = JSON.stringify(card._arrEdit);
+  assert.equal(kid(card, "c").slot.hidden, true);
+
+  click(undo); // the bin
+  assert.equal(kid(card, "c").slot.hidden, false);
+  assert.equal(place(card, "c").c, 2);
+  key({ key: "z", ctrlKey: true }); // the column
+  assert.equal(card._arrEdit.grid.cols, 12);
+  assert.equal(place(card, "b").h, 2);
+  key({ key: "z", metaKey: true }); // the resize
+  assert.equal(place(card, "b").h, 1);
+  click(undo); // the move
+  assert.deepEqual(place(card, "a"), { c: 0, r: 0, w: 1, h: 1 });
+  assert.equal(JSON.stringify(card._arrEdit), start);
+  assert.deepEqual([undo.disabled, redo.disabled], [true, false]);
+  click(undo); // nothing left: nothing happens
+  assert.equal(JSON.stringify(card._arrEdit), start);
+
+  click(redo);
+  key({ key: "Z", ctrlKey: true, shiftKey: true });
+  key({ key: "y", ctrlKey: true });
+  click(redo);
+  assert.equal(JSON.stringify(card._arrEdit), end);
+  assert.equal(kid(card, "c").slot.hidden, true);
+  assert.deepEqual([undo.disabled, redo.disabled], [false, true]);
+
+  // a new step after an Undo: what was taken back is not there to do again
+  click(undo);
+  click(undo);
+  drag(card, "b", at(1, 0), at(3, 3));
+  assert.equal(redo.disabled, true);
+  const put = place(card, "b");
+  assert.equal(put.c, 3);
+  assert.equal(hass.userData, null); // nothing is kept before Done
+  click(button(card, "Done"));
+  await tick();
+  const kept = hass.userData.layouts[HOME];
+  assert.deepEqual(kept.tiles.find((t) => t.id === "b"), { id: "b", ...put });
+  assert.equal(kept.hidden, undefined);
+});
+
+test("Undo: a move that was refused is no step, and typing in a field keeps Ctrl+Z for itself", async () => {
+  const card = await mount(three(), { hass: fakeHass({ lovelace: { views: [] } }) });
+  open(card);
+  drag(card, "a", at(0, 0), at(0, 0)); // put down where it was
+  assert.equal(button(card, "Undo").disabled, true);
+  drag(card, "a", at(0, 0), at(5, 1));
+  fire(card._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(card, "Add group…"));
+  const field = all(byClass(card, "menu")[0], (el) => el.localName === "input")[0];
+  const ev = fire(field, "keydown", { key: "z", ctrlKey: true });
+  assert.equal(ev.defaultPrevented, false);
+  assert.equal(place(card, "a").c, 5);
+});
+
+test("Undo: one history for the page and its groups", async () => {
+  const card = await mount(nestedPage(), { hass: fakeHass() });
+  await tick();
+  const lights = kid(card, "lights").el;
+  open(card);
+  const was = [place(lights, "x"), place(card, "a")];
+  drag(lights, "x", at(0, 0), at(8, 0)); // in the group
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowDown" }); // on the page
+  assert.notDeepEqual(place(lights, "x"), was[0]);
+  assert.notDeepEqual(place(card, "a"), was[1]);
+  click(button(card, "Undo"));
+  assert.deepEqual(place(card, "a"), was[1]);
+  assert.notDeepEqual(place(lights, "x"), was[0]);
+  key({ key: "z", ctrlKey: true });
+  assert.deepEqual(place(lights, "x"), was[0]);
+  click(button(card, "Redo"));
+  assert.notDeepEqual(place(lights, "x"), was[0]);
+  assert.deepEqual(place(card, "a"), was[1]);
+});
+
+test("Undo: a card dropped on another group goes back to its own, and Arrange goes on", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  const before = JSON.stringify(saved());
+  card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  kid(card, "lights").el.rect = { left: 0, top: 0, width: 1200, height: 300 };
+  open(card);
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowDown" }); // a step before it
+  const down = place(card, "a");
+  drag(card, "a", at(down.c, down.r), at(8, 0)); // onto the group
+  await tick();
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "room", "a"]);
+  document.body.replaceChildren(); // the page is redrawn
+  const again = await mount(saved(), { hass });
+  await tick();
+  assert.equal(again._arranging, true);
+  assert.deepEqual([button(again, "Undo").disabled, button(again, "Redo").disabled], [false, true]);
+
+  click(button(again, "Undo")); // the dashboard is changed back
+  await tick();
+  assert.equal(JSON.stringify(saved()), before);
+  document.body.replaceChildren();
+  const third = await mount(saved(), { hass });
+  await tick();
+  assert.equal(third._arranging, true);
+  assert.deepEqual(place(third, "a"), down); // where it was before the drop
+  assert.equal(button(third, "Redo").disabled, true); // (a step in the dashboard is not done again)
+  click(button(third, "Undo")); // and the step before that
+  assert.equal(place(third, "a").r, down.r - 1);
+
+  // Cancel still leaves everything as it was when Arrange was opened
+  click(button(third, "Cancel"));
+  await tick();
+  await tick();
+  assert.equal(JSON.stringify(saved()), before);
+  assert.deepEqual(hass.userData.layouts || {}, {});
+});
+
+test("Undo in the list: the order and the bin", async () => {
+  const card = await mount(three(), { width: 400, hass: fakeHass() });
+  open(card);
+  const order = () => [...card._arrListEdit];
+  click(byClass(kid(card, "a").arr, "down")[0]);
+  click(byClass(kid(card, "c").arr, "rm")[0]);
+  assert.deepEqual(order(), ["b", "a"]);
+  click(button(card, "Undo"));
+  assert.deepEqual(order(), ["b", "a", "c"]);
+  assert.equal(kid(card, "c").slot.hidden, false);
+  click(button(card, "Undo"));
+  assert.deepEqual(order(), ["a", "b", "c"]);
+  click(button(card, "Redo"));
+  assert.deepEqual(order(), ["b", "a", "c"]);
+});
+
+const arranged = () => ({
+  [HOME]: { grid: { cols: 12, rows: 3 }, tiles: [{ id: "lights", c: 0, r: 0, w: 6, h: 2 }, { id: "a", c: 9, r: 2, w: 3, h: 1 }], hidden: [] },
+  [`${HOME}/lights`]: { grid: { cols: 12, rows: 2 }, tiles: [{ id: "x", c: 8, r: 1, w: 4, h: 1 }] },
+  elsewhere: { list: ["x"] },
+});
+
+test("Reset in Arrange asks first, says what goes, and can be taken back", async () => {
+  const hass = fakeHass({ userData: { other: 1, layouts: arranged() } });
+  const card = await mount(nestedPage(), { hass });
+  await tick();
+  const lights = kid(card, "lights").el;
+  open(card);
+  assert.equal(button(card, "Reset"), undefined); // not a button beside Done and Cancel
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowLeft" }); // not saved yet: kept all the same
+  click(button(card, "Reset…"));
+  const ask = byClass(card, "ask")[0];
+  assert.match(ask.textContent, /the page and the 2 groups in it/);
+  assert.match(ask.textContent, /Only your own arrangement is forgotten/);
+  assert.equal(dom.focused, button(card, "Keep arranging"));
+  key({ key: "Escape" }); // Esc answers the question, not the Arrange
+  assert.equal(card._arranging, true);
+  assert.equal(byClass(card, "ask").length, 0);
+  click(button(card, "Reset…"));
+  click(button(card, "Keep arranging"));
+  assert.equal(card._arranging, true);
+  assert.equal(place(card, "a").c, 8);
+
+  click(button(card, "Reset…"));
+  click(button(card, "Reset"));
+  await tick();
+  assert.equal(card._arranging, false);
+  assert.equal(place(card, "a").r, 0);
+  assert.equal(place(lights, "x").c, 0);
+  assert.equal(hass.userData.layouts[`${HOME}/lights`], undefined);
+  assert.deepEqual(hass.userData.layouts.elsewhere, { list: ["x"] });
+  assert.equal(hass.userData.other, 1);
+  // what was on screen is kept with the user's data, for the page and its groups
+  const prev = hass.userData.previous[HOME];
+  assert.equal(prev.length, 1);
+  assert.equal(prev[0].why, "reset");
+  assert.deepEqual(Object.keys(prev[0].layouts).sort(), [HOME, `${HOME}/lights`, `${HOME}/lights/room`]);
+  assert.deepEqual(prev[0].layouts[HOME].tiles.find((t) => t.id === "a"), { id: "a", c: 8, r: 2, w: 3, h: 1 });
+  assert.deepEqual(prev[0].layouts[`${HOME}/lights`], arranged()[`${HOME}/lights`]);
+  assert.equal(prev[0].layouts[`${HOME}/lights/room`], null);
+
+  assert.match(card._bar.textContent, /^The arrangement is reset\./);
+  click(button(card, "Undo reset"));
+  await tick();
+  assert.deepEqual([place(card, "a").c, place(card, "a").r], [8, 2]);
+  assert.deepEqual([place(lights, "x").c, place(lights, "x").r], [8, 1]);
+  assert.deepEqual(hass.userData.layouts[`${HOME}/lights`], arranged()[`${HOME}/lights`]);
+});
+
+test("Reset layout in the menu asks first; what it was is restored later, after a reload, from the menu", async () => {
+  const hass = fakeHass({ userData: { layouts: arranged() } });
+  const card = await mount(nestedPage(), { hass });
+  await tick();
+  click(card._btn);
+  click(button(card, "Reset layout…"));
+  assert.match(byClass(byClass(card, "menu")[0], "note")[0].textContent, /^This resets the page and the 2 groups in it: places, sizes/);
+  assert.equal(dom.focused, button(card, "Keep it as it is"));
+  click(button(card, "Keep it as it is"));
+  await tick();
+  assert.deepEqual(hass.userData.layouts, arranged());
+
+  click(card._btn);
+  click(button(card, "Reset layout…"));
+  click(button(card, "Reset only the page's own grid, not the groups in it"));
+  await tick();
+  assert.equal(hass.userData.layouts[HOME], undefined);
+  assert.deepEqual(hass.userData.layouts[`${HOME}/lights`], arranged()[`${HOME}/lights`]);
+  assert.deepEqual(Object.keys(hass.userData.previous[HOME][0].layouts), [HOME]);
+
+  click(card._btn);
+  click(button(card, "Reset layout…"));
+  click(button(card, "Reset the whole page"));
+  await tick();
+  assert.deepEqual(hass.userData.layouts, { elsewhere: { list: ["x"] } });
+  assert.equal(hass.userData.previous[HOME].length, 2);
+
+  // another browser, another day: nothing of it is in the page or the browser
+  dom.store.clear();
+  document.body.replaceChildren();
+  const later = await mount(nestedPage(), { hass });
+  await tick();
+  click(later._btn);
+  click(button(later, "Restore a previous arrangement…"));
+  await tick();
+  const items = all(byClass(later, "menu")[0], (el) => el.localName === "button");
+  assert.equal(items.length, 2);
+  assert.match(items[0].textContent, /^Before the reset · /);
+  click(items[1]); // the older one: the page's own grid
+  await tick();
+  assert.deepEqual(hass.userData.layouts[HOME], arranged()[HOME]);
+  assert.equal(hass.userData.layouts[`${HOME}/lights`], undefined);
+  assert.deepEqual([place(later, "a").c, place(later, "a").r], [9, 2]);
+  // nothing was there to lose, so restoring kept nothing more
+  assert.equal(hass.userData.previous[HOME].length, 2);
+});
+
+test("previous arrangements: Done keeps what it replaced, the last five are kept, and the browser has them when Home Assistant does not", async () => {
+  const hass = fakeHass({ userData: { layouts: { [HOME]: { grid: { cols: 12, rows: 1 }, tiles: [{ id: "a", c: 0, r: 0, w: 1, h: 1 }] } } } });
+  const card = await mount(three(), { hass });
+  open(card);
+  click(button(card, "Done")); // nothing changed: nothing kept
+  await tick();
+  assert.equal(hass.userData.previous, undefined);
+  for (let i = 1; i <= 7; i++) {
+    open(card);
+    fire(kid(card, "a").arr, "keydown", { key: "ArrowRight" });
+    click(button(card, "Done"));
+    await tick();
+  }
+  const prev = hass.userData.previous[HOME];
+  assert.equal(prev.length, 5);
+  assert.ok(prev.every((e) => e.why === "arrange"));
+  assert.deepEqual(prev.map((e) => e.layouts[HOME].tiles[0].c), [6, 5, 4, 3, 2]); // the newest first
+  assert.ok(prev.every((e, i) => !i || e.at < prev[i - 1].at));
+  click(card._btn);
+  click(button(card, "Restore a previous arrangement…"));
+  await tick();
+  click(all(byClass(card, "menu")[0], (el) => el.localName === "button")[0]);
+  await tick();
+  assert.equal(place(card, "a").c, 6);
+  click(button(card, "Undo")); // restoring is taken back too
+  await tick();
+  assert.equal(place(card, "a").c, 7);
+
+  hass.failSet = true;
+  open(card);
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowDown" });
+  click(button(card, "Reset…"));
+  click(button(card, "Reset"));
+  await tick();
+  const local = JSON.parse(dom.store.get(`arrange-grid-card:previous:${HOME}`));
+  assert.deepEqual([local[0].why, local[0].layouts[HOME].tiles[0].r], ["reset", 1]);
+  click(card._btn);
+  click(button(card, "Restore a previous arrangement…"));
+  await tick();
+  assert.match(all(byClass(card, "menu")[0], (el) => el.localName === "button")[0].textContent, /^Before the reset/);
+});
+
+test("storage: config: Reset says it is for everyone, and the dashboard's arrangement can be put back", async () => {
+  const kept = { grid: { cols: 12, rows: 1 }, tiles: [{ id: "a", c: 7, r: 0, w: 1, h: 1 }] };
+  const config = { ...three(), storage: "config", default_layout: kept };
+  const { hass, card, saved } = await onDashboard(config);
+  open(card);
+  click(button(card, "Reset…"));
+  assert.match(byClass(card, "ask")[0].textContent, /kept in the dashboard: it is removed for everyone/);
+  click(button(card, "Reset"));
+  await tick();
+  assert.equal("default_layout" in saved(), false);
+  assert.deepEqual(hass.userData.previous[HOME][0].defaults, { [HOME]: kept });
+  assert.match(card._bar.textContent, /removed from the dashboard, for everyone/);
+  click(button(card, "Undo reset"));
+  await tick();
+  assert.deepEqual(saved().default_layout, kept);
+  assert.equal(place(card, "a").c, 7);
 });
