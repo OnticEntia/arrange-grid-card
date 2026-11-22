@@ -70,6 +70,11 @@ class Node extends Target {
     for (let n = this; n; n = n.parentNode || n.host) if (n === document.body) return true;
     return false;
   }
+  getRootNode() {
+    let n = this;
+    while (n.parentNode) n = n.parentNode;
+    return n;
+  }
   _adopt(nodes) {
     return nodes.map((n) => {
       const node = typeof n === "string" ? new Text(n) : n;
@@ -171,6 +176,9 @@ class Element extends Node {
   setAttribute(k, v) {
     this._attrs[k] = String(v);
   }
+  removeAttribute(k) {
+    delete this._attrs[k];
+  }
   getAttribute(k) {
     return k in this._attrs ? this._attrs[k] : null;
   }
@@ -252,7 +260,15 @@ const localStorage = {
   clear: () => store.clear(),
 };
 
-const dom = { Ev, Element, win, store, rects: null, focused: null, registry };
+const session = new Map();
+const sessionStorage = {
+  getItem: (k) => (session.has(k) ? session.get(k) : null),
+  setItem: (k, v) => void session.set(k, String(v)),
+  removeItem: (k) => void session.delete(k),
+  clear: () => session.clear(),
+};
+
+const dom = { Ev, Element, win, store, session, rects: null, focused: null, registry };
 
 // Puts the stand-ins where a script loaded in a browser finds them.
 function install() {
@@ -262,6 +278,7 @@ function install() {
     customElements,
     HTMLElement: Element,
     localStorage,
+    sessionStorage,
     location: { pathname: "/dashboard-test/home" },
     CustomEvent: Ev,
     ResizeObserver: class {

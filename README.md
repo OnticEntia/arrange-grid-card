@@ -61,7 +61,11 @@ Give every card an `id`. A saved place is kept under it, so cards can be added, 
 | `storage` | `user` | `user`: each Home Assistant user arranges their own. `config`: one arrangement for everyone, kept in this card's config in the dashboard. |
 | `layout` | the page's path | The name the arrangement is kept under. Set it when two of these cards are on one page, or to share one arrangement between pages. |
 | `default_layout` | none | The arrangement everyone starts from (see below). |
+| `badges` | none | Badges shown in a centred row over the grid, written as a view's `badges` are (an entity id, or a badge's config). A panel view has no badges of its own. Set in YAML. |
+| `title`, `icon` | none | A title bar over the cards. Meant for a group (this card inside another, see Groups). |
 | `arrange_button` | `true` | The round button under the grid that opens the menu. |
+| `groups` | `true` | A `heading` card and the cards after it, up to the next heading, are a group (see Groups). `false` turns that off. |
+| `hide_add_menu` | `false` | `true` hides the add menu in Home Assistant's dashboard header (add device, create automation, create area, add person) while this card is on screen. Those add nothing to this page; cards and groups are added from the card's own menu and editor. |
 | `context_menu` | `true` | `false` leaves right-click and long press alone; the button is then the only way in. |
 
 Styling: `--arrange-grid-padding` (default `8px`) is the space around the grid. Everything else follows the theme's variables.
@@ -70,19 +74,68 @@ Styling: `--arrange-grid-padding` (default `8px`) is the space around the grid. 
 
 Open the menu with the button under the grid, a right-click anywhere on the page, or a long press on an empty part of it. A long press on a card is left to the card (its hold action).
 
-- **Arrange…** On a wide screen: drag a card to any cell (with a mouse from anywhere on it, with a finger by the grip in its corner, so the page still scrolls). Dropped on another card, the two change places if both fit. Drag the handle in the other corner to resize. A card never overlaps another and never leaves the grid; when something cannot be done, the bar says why. `Columns` and `Rows` add or remove one; the last one goes only when it is empty. There is always an empty row under the last card to drag into, and empty rows at the bottom are not saved. Holding a card near the top or bottom of the window scrolls the page.
+- **Arrange…** On a wide screen: drag a card to any cell (with a mouse from anywhere on it, with a finger by the grip in its corner, so the page still scrolls). Dropped on another card, the two change places if both fit. Drag the handle in the other corner to resize. A card never overlaps another and never leaves the grid; when something cannot be done, the bar says why. `Columns` and `Rows` add or remove one; the last one goes only when it is empty. While a card is being dragged, the grid under the pointer (the page, or the group it is over) shows an empty row under its last card to drop into; everything else, and all of it the rest of the time, is shown at its real size. A row added with `Rows` stays until Done; empty rows at the bottom are not saved. Holding a card near the top or bottom of the window scrolls the page.
 - With the keyboard: Tab to a card, arrow keys move it one cell, Shift and arrow keys resize it, Esc cancels.
+- **The bin.** While a card is dragged, a bin shows at the bottom of the window; dropping the card there removes it. With the keyboard, Delete does the same. A selected group goes as one. For an administrator, on a dashboard edited in Home Assistant's UI, removing is **deleting**: when Done is pressed the card leaves the dashboard's config, for everyone, and Reset layout has nothing to bring back. For anyone else (or a YAML dashboard) it is hiding: the user's own, and **Show a hidden card…** brings it back. Either way nothing happens before Done: Cancel brings everything back, and **Undo** in the bar takes back the last one until something else is changed.
 - **Done** saves, **Cancel** (or Esc) drops the changes, **Reset** forgets the arrangement and goes back to the default one.
 - **Hide a card… / Show a hidden card…** A hidden card is taken off the page, so it loads and plays nothing, and keeps its place for when it is shown again.
 - **Reset layout** forgets everything of the user's own: places, sizes, the list's order, what is hidden.
 
-On a narrow screen Arrange only changes the order, with each card's arrows or by dragging its grip onto another card. That order is saved apart from the wide grid: neither changes the other, and Reset only resets the one on screen. Until an order is made, the list follows the wide grid row by row.
+On a narrow screen Arrange only changes the order, with each card's arrows or by dragging its grip onto another card. Each card also has a bin button (and the bin shows while dragging); on a group's heading it removes the whole group. That order is saved apart from the wide grid: neither changes the other, and Reset only resets the one on screen. Until an order is made, the list follows the wide grid row by row.
+
+## Groups
+
+A group is a box with a title that holds cards of its own. It is this same card, used as one of the cards of another:
+
+```yaml
+type: custom:arrange-grid-card
+layout: home
+columns: 48
+cards:
+  - id: lights
+    type: custom:arrange-grid-card
+    title: Lights
+    icon: mdi:lightbulb
+    cards:
+      - id: bedroom
+        type: custom:arrange-grid-card
+        title: Bedroom
+        cards:
+          - id: lamp
+            type: tile
+            entity: light.lamp
+```
+
+- **One Arrange for everything.** Arrange on the page opens the page and every group in it at once, to any depth: any card can be dragged, resized or dropped on the bin where it is, without opening its group first. There is one bar; Done, Reset and Cancel are for all of it. A group nobody touched keeps no arrangement of its own.
+- **Right-click while arranging** opens a short menu for what is under the pointer. On a group's title bar (or an empty part inside the group): one column or row more or fewer for the group's own grid, **Fit the group's height to its cards**, **Add group inside…**, and removing it. On an empty part of the page: the page's columns and rows, and **Add group…**. On a card: removing it. A group added while arranging is written into the dashboard at once (what was arranged so far is kept, the page is redrawn and Arrange goes on); Cancel takes it away again.
+- **Done fits every group's height to its cards**: shorter always, taller where there is room under it (otherwise its rows stretch, as for any card taller than its cells).
+- **A group is one card of the grid it is in.** While arranging, its title bar is its handle (drag it to move the group with everything in it) and its corner resizes it; the bin removes the whole group. With nothing arranged it is as wide as a section and as tall as what is in it.
+- **Inside, it has its own grid** (12 columns unless `columns` says otherwise, so cards sit as they would in a section) and its own arrangement, kept under `<the outer name>/<its id>`. Right-click in the group, or long-press an empty part of it, for the group's menu: **Arrange inside this group…** (only this group, with its own Columns and Rows), **Hide this group**, **Arrange the whole page…**.
+- **In the list a group folds shut** by its title bar, leaving only the title. What is folded is kept per user (with `storage: config`, per browser).
+- **Groups hold groups**, to any depth: "Lights" can hold a group for each room.
+- A group takes `row_height`, `gap`, `storage` and `context_menu` from the card it is in unless it sets its own, shows no arrange button unless `arrange_button: true`, and is a grid or a list as the outer card is.
+- **Adding one:** the page's menu has **Add group…** (and a group's menu **Add group inside…**): type a title and the empty group is written into the dashboard, ready to be filled with **Move to…** or by dragging. Like moving a card, this is for an administrator on a dashboard edited in Home Assistant's UI. The editor's **Add group** does the same from the card's editor; editing a group there opens this same editor for the group's own cards.
+- **Moving a card to another group: drop it there.** While arranging, a card dragged over another group (or out of its own, onto the page) lights that group up and the bar says where it would go. Dropped, it becomes one of that group's cards, at the cell it was dropped on (the next free one if that is taken); in the list, at the row it was dropped on. "In a group" means inside the group's box; the innermost box under the pointer wins.
+- **What a drop does.** Which group a card is in is the dashboard's config, so the drop rewrites the dashboard: for everyone, only by an administrator, and only on a dashboard edited in Home Assistant's UI (not YAML). Everything arranged so far is kept first, as Done would; Home Assistant then redraws the page and Arrange opens again by itself. **Cancel still takes it all back**: the cards return to their groups and every arrangement to what it was when Arrange was opened. Done makes it stay.
+- A card's menu also has **Move to…**, which lists the page and every group; a group's own menu has **Move this group to…**. A group itself changes groups by the menu only, so that dragging groups about never nests them by accident.
+
+### Headings as groups
+
+The lighter way, for a flat page: a `heading` card starts a group: the cards after it in the config, up to the next heading, belong to it. Nothing else has to be set.
+
+- **On a wide screen, in Arrange:** a group's heading has a button beside its grip. Press it to select the group; then dragging any of its cards, or moving one with the arrow keys, moves the heading and all its cards together, keeping their places relative to one another. The group goes only where all of it has room; it does not swap with other cards. Press the button again to move cards one by one. Resizing is always one card at a time.
+- **In the list:** each group's heading has a button at its right end that folds the group shut, leaving only the heading. What is folded is kept per user (with `storage: config`, per browser). Folded cards stay loaded, so opening a group is instant.
+- **Hiding:** the menu of any card in a group also has **Hide this group**, which hides the heading and all its cards at once. Showing a hidden heading again brings back the hidden cards under it.
+- **Removing:** in the editor, a heading with cards under it has a second remove button that takes the whole group out of the config.
+- **Ordering the list:** moving a heading takes its cards along as one block, and its arrows step over a whole neighbouring group at a time. Other cards move one place at a time, as before.
 
 ## Sizes
 
 - **With nothing arranged**, cards follow one another in the config's order. Each takes the size it asks for: `grid_options` in its config (`columns` out of 12, `rows`), else what the card itself reports, else the full width of a section and a height from its card size. A sections view's section, 12 of those columns, is taken as a quarter of the grid's columns.
 - **In the list**, a card is as wide as its `columns` out of 12, exactly as in one section of a sections view: two 6-column tiles sit side by side, four 3-column buttons share a row.
 - **Children are told they are in a grid** (`layout = "grid"`, as a sections view does), so cards that support it fill the cells they are given.
+- **Opening Arrange gives every card the rows it needs.** A card that was shorter than its content (its rows were stretched to hold it, leaving gaps in its neighbours) is made as tall as it needs, and what is under it moves down. The same for a group that outgrew its box. Cancel puts it all back.
+- **A card cannot be sized shorter than its content.** In Arrange, resizing stops at the height the card needs at its width (a group knows it from its cards; any other card is measured on screen), and the bar says so. Shorter than that, its rows would stretch and everything else in those rows with them.
 - **A card taller than its cells makes its rows taller.** Rows are at least `row_height` and grow with their content; nothing scrolls inside a cell and nothing is cut off. The other choice, a scrollbar inside the cell, traps the finger on a phone and hides content behind a second scroll on a page that already scrolls. The cost is that rows are not all the same height once a card outgrows its cells; giving that card more rows in Arrange evens it out.
 
 ## Where the arrangement is kept
@@ -111,9 +164,12 @@ The visual editor lists the cards (add with Home Assistant's card picker, edit w
 
 - `visibility` conditions on a child are not applied: the children are created with Home Assistant's card helpers, and conditions are handled by a wrapper those do not include. Use a `conditional` card as the child instead.
 - The editor borrows Home Assistant's card picker and card editor (`hui-card-picker`, `hui-card-element-editor`), which are loaded by asking for the stack card's editor. If a release changes that, cards are still editable: the config is shown as JSON text instead. Written against Home Assistant 2026.11.
-- A panel view shows no badges; put them in a `heading` card.
+- A panel view shows no badges; use this card's `badges` option, or a `heading` card's.
 - Two of these cards on one page need different `layout` names (cards added from the picker get one).
-- An arranging grid inside another one works for the menu, but arranging the outer one covers the inner one's cards like any other card.
+- With `storage: config`, an arrangement made inside a group cannot be written to the dashboard by the card: it is shown as text to paste into the group's `default_layout`.
+- A group's height in the outer grid follows its cards when Done is pressed in Arrange (or by the menu's **Fit the group's height to its cards**), not at other times.
+- The menu while arranging takes a right-click, so it is not to be had on a touch screen; there, **Arrange inside this group…** shows the group's Columns and Rows in the bar.
+- `hide_add_menu` reaches into Home Assistant's header to hide one button. If a release moves that button the option stops working, and nothing else breaks. On a narrow screen the same entries sit in the header's overflow menu, which is left alone.
 - The menu takes over right-click on the page, except in text fields. Set `context_menu: false` to keep the browser's menu.
 
 ## Layout
@@ -135,7 +191,7 @@ The arranging model (cells and places, Arrange mode, the one-column list, the me
 
 ## Status
 
-Version 0.1.0. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
+Version 0.12.1. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
 
 ## Licence
 

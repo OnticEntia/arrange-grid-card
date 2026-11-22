@@ -36,9 +36,14 @@ customElements.define("fake-card", FakeCard);
 let created = [];
 globalThis.loadCardHelpers = async () => ({
   createCardElement(config) {
-    const el = document.createElement("fake-card");
+    const el = document.createElement(config.type === "custom:arrange-grid-card" ? "arrange-grid-card" : "fake-card");
     el.setConfig(config);
     created.push(el);
+    return el;
+  },
+  createBadgeElement(config) {
+    const el = document.createElement("fake-card");
+    el.setConfig(config);
     return el;
   },
 });
@@ -123,6 +128,7 @@ const overlaps = (tiles) => tiles.some((a, i) => tiles.some((b, j) => j > i && a
 beforeEach(() => {
   created = [];
   dom.store.clear();
+  dom.session.clear();
   document.body.replaceChildren();
   // every cell 100 x 50 on screen, the grid at the top left
   dom.rects = (el) => (el.classList.contains("cell") ? { left: (parseInt(el.style.gridColumn, 10) - 1) * 100, top: (parseInt(el.style.gridRow, 10) - 1) * 50, width: 92, height: 42 } : null);
@@ -282,8 +288,15 @@ test("arranging: a card dragged to a free cell stays there, gaps and all, per us
   const card = await mount(three(), { hass });
   click(card._btn);
   click(button(card, "Arrange…"));
-  assert.equal(byClass(card, "cell").length, 12 * 2); // the row in use and a spare one
+  assert.equal(byClass(card, "cell").length, 12); // the row in use: the grid at its real size
   const a = created[0];
+  // a spare row to drop into is there for as long as something is dragged
+  fire(kid(card, "b").arr, "pointerdown", { pointerId: 1, button: 0, pointerType: "mouse", clientX: 150, clientY: 25 });
+  assert.equal(byClass(card, "cell").length, 12);
+  fire(kid(card, "b").arr, "pointermove", { pointerId: 1, clientX: 160, clientY: 30 });
+  assert.equal(byClass(card, "cell").length, 12 * 2);
+  fire(kid(card, "b").arr, "pointerup", { pointerId: 1, clientX: 160, clientY: 30 });
+  assert.equal(byClass(card, "cell").length, 12);
   drag(card, "a", at(0, 0), at(7, 1));
   assert.deepEqual(place(card, "a"), { c: 7, r: 1, w: 1, h: 1 });
   assert.deepEqual(place(card, "b"), { c: 1, r: 0, w: 1, h: 1 });
@@ -327,7 +340,7 @@ test("arranging: resizing stops at a neighbour and at the grid's edge, and may g
   assert.deepEqual(place(card, "c"), { c: 2, r: 0, w: 2, h: 2 }); // (only two rows existed under the pointer)
   drag(card, "c", at(2, 0), at(3, 2), { handle: "size" });
   assert.deepEqual(place(card, "c"), { c: 2, r: 0, w: 2, h: 3 }); // a row was added under it each time
-  assert.equal(byClass(card, "cell").length, 4 * 4);
+  assert.equal(byClass(card, "cell").length, 4 * 3); // and no spare one is left behind
 });
 
 test("arranging: a finger moves a card only by its grip; the keyboard works too", async () => {
@@ -348,18 +361,31 @@ test("arranging: a finger moves a card only by its grip; the keyboard works too"
   assert.deepEqual(place(card, "a"), { c: 0, r: 0, w: 1, h: 1 });
 });
 
+test("arranging: the keyboard moves a card below the last row, which makes one", async () => {
+  const card = await mount(three());
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowDown" });
+  assert.equal(place(card, "a").r, 1);
+  assert.equal(byClass(card, "cell").length, 12 * 2);
+});
+
 test("arranging: columns and rows are added freely, removed only when empty", async () => {
   const card = await mount({ ...three(), columns: 3 });
   click(card._btn);
   click(button(card, "Arrange…"));
   const [colMinus, rowMinus] = all(card, (el) => el.localName === "button" && el.textContent === "−");
-  const [colPlus] = all(card, (el) => el.localName === "button" && el.textContent === "+");
+  const [colPlus, rowPlus] = all(card, (el) => el.localName === "button" && el.textContent === "+");
   click(colMinus);
   assert.match(byClass(card, "why")[0].textContent, /last column still has a card/);
-  assert.equal(byClass(card, "cell").length, 3 * 2);
+  assert.equal(byClass(card, "cell").length, 3);
   click(colPlus);
+  assert.equal(byClass(card, "cell").length, 4);
+  click(rowPlus); // a row added by hand stays, drag or no drag
   assert.equal(byClass(card, "cell").length, 4 * 2);
-  click(rowMinus); // the spare row is empty
+  drag(card, "a", at(0, 0), at(3, 0));
+  assert.equal(byClass(card, "cell").length, 4 * 2);
+  click(rowMinus); // it is empty
   assert.equal(byClass(card, "cell").length, 4);
   click(rowMinus);
   assert.match(byClass(card, "why")[0].textContent, /last row still has a card/);
@@ -532,6 +558,787 @@ test("the menu leaves alone: text fields, cards under a finger, a grid inside a 
   const quiet = await mount({ ...three(), context_menu: false, arrange_button: false });
   assert.equal(fire(kid(quiet, "a").el, "contextmenu").defaultPrevented, false);
   assert.equal(quiet._foot.hidden, true);
+});
+
+// ----------------------------------------------------------------- groups
+
+const head = (id) => ({ id, type: "heading", heading: id, grid_options: { columns: 12, rows: 1 } });
+const grouped = () => ({ type: "custom:arrange-grid-card", cards: [head("h1"), small("a"), small("b"), head("h2"), small("c")] });
+
+test("groups: a selected group moves as one, and only where all of it has room", async () => {
+  const card = await mount(grouped());
+  assert.deepEqual(["h1", "a", "b", "h2", "c"].map((k) => place(card, k).c), [0, 3, 4, 5, 8]);
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  assert.match(card._bar.textContent, /selects its group/);
+  const pick = byClass(kid(card, "h1").arr, "pick")[0];
+  assert.equal(byClass(kid(card, "a").arr, "pick").length, 0); // only a group's heading has one
+  click(pick);
+  assert.equal(pick.getAttribute("aria-pressed"), "true");
+  assert.deepEqual(["h1", "a", "b", "h2", "c"].map((k) => kid(card, k).arr.classList.contains("sel")), [true, true, true, false, false]);
+
+  drag(card, "a", at(3, 0), at(3, 1)); // held by one of its cards, one row down
+  assert.deepEqual(["h1", "a", "b"].map((k) => [place(card, k).c, place(card, k).r]), [[0, 1], [3, 1], [4, 1]]);
+  assert.deepEqual([place(card, "h2").r, place(card, "c").r], [0, 0]);
+
+  const arr = kid(card, "b").arr;
+  fire(arr, "keydown", { key: "ArrowLeft" }); // the heading is at the edge already
+  assert.equal(place(card, "h1").c, 0);
+  assert.match(byClass(card, "why")[0].textContent, /No room for the group/);
+  for (let i = 0; i < 3; i++) fire(arr, "keydown", { key: "ArrowRight" });
+  assert.deepEqual(["h1", "a", "b"].map((k) => place(card, k).c), [3, 6, 7]);
+  fire(arr, "keydown", { key: "ArrowUp" }); // onto the other group's heading
+  assert.equal(place(card, "h1").r, 1);
+  assert.match(byClass(card, "why")[0].textContent, /No room for the group/);
+  drag(card, "h1", at(3, 1), at(0, 1)); // far left, held by its heading: stops at the edge
+  assert.deepEqual(["h1", "a", "b"].map((k) => place(card, k).c), [0, 3, 4]);
+
+  click(pick); // nothing selected: a card moves alone again
+  drag(card, "a", at(3, 1), at(10, 1));
+  assert.deepEqual([place(card, "a").c, place(card, "h1").c, place(card, "b").c], [10, 0, 4]);
+});
+
+test("groups: in the list a group folds shut, per user, and only there", async () => {
+  const hass = fakeHass();
+  const card = await mount(grouped(), { width: 400, hass });
+  const fold = byClass(kid(card, "h1").slot, "fold")[0];
+  assert.equal(fold.getAttribute("aria-expanded"), "true");
+  assert.equal(byClass(kid(card, "a").slot, "fold").length, 0);
+  click(fold);
+  await tick();
+  assert.deepEqual(["h1", "a", "b", "h2", "c"].map((k) => kid(card, k).slot.hidden), [false, true, true, false, false]);
+  assert.equal(fold.getAttribute("aria-expanded"), "false");
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home"].folded, ["h1"]);
+  assert.equal(created[1].removals || 0, 0); // still there, just not shown
+
+  const wide = await mount(grouped(), { hass });
+  assert.equal(kid(wide, "a").slot.hidden, false); // the wide grid shows everything
+  assert.ok(byClass(wide, "fold").every((b) => b.hidden));
+
+  click(fold);
+  await tick();
+  assert.equal(kid(card, "a").slot.hidden, false);
+  assert.equal(hass.userData.layouts["/dashboard-test/home"], undefined);
+
+  const plain = await mount({ ...grouped(), groups: false }, { width: 400 });
+  assert.equal(byClass(plain, "fold").length, 0);
+});
+
+test("groups: with storage: config what is folded stays in the browser", async () => {
+  const hass = fakeHass();
+  const card = await mount({ ...grouped(), storage: "config", layout: "g" }, { width: 400, hass });
+  click(byClass(kid(card, "h2").slot, "fold")[0]);
+  await tick();
+  assert.equal(kid(card, "c").slot.hidden, true);
+  assert.equal(hass.calls.length, 0);
+  const again = await mount({ ...grouped(), storage: "config", layout: "g" }, { width: 400, hass });
+  assert.equal(kid(again, "c").slot.hidden, true);
+});
+
+test("groups: ordering the list, a heading takes its cards along and steps over whole groups", async () => {
+  const hass = fakeHass();
+  const card = await mount(grouped(), { width: 400, hass });
+  const order = () => ["h1", "a", "b", "h2", "c"].sort((x, y) => kid(card, x).slot.style.order - kid(card, y).slot.style.order);
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  click(byClass(kid(card, "h1").arr, "down")[0]);
+  assert.deepEqual(order(), ["h2", "c", "h1", "a", "b"]);
+  click(byClass(kid(card, "b").arr, "up")[0]); // a card on its own: one place
+  assert.deepEqual(order(), ["h2", "c", "h1", "b", "a"]);
+  click(byClass(kid(card, "h1").arr, "up")[0]);
+  assert.deepEqual(order(), ["h1", "b", "a", "h2", "c"]);
+  click(byClass(kid(card, "h1").arr, "up")[0]); // first already
+  assert.deepEqual(order(), ["h1", "b", "a", "h2", "c"]);
+  // dropped on a card of another group, the block goes there
+  for (const [k, i] of [["h1", 0], ["b", 1], ["a", 2], ["h2", 3], ["c", 4]]) kid(card, k).slot.rect = { left: 0, top: i * 50, width: 300, height: 50 };
+  drag(card, "h2", [10, 175], [10, 25], { pointerType: "touch", handle: "grip" });
+  assert.deepEqual(order(), ["h2", "c", "h1", "b", "a"]);
+  click(button(card, "Done"));
+  await tick();
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home"].list, ["h2", "c", "h1", "b", "a"]);
+});
+
+test("groups: the menu hides a whole group, and its heading brings it back", async () => {
+  const hass = fakeHass();
+  const card = await mount(grouped(), { hass });
+  fire(kid(card, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(card, "Hide this group"));
+  await tick();
+  assert.deepEqual(["h1", "a", "b", "h2", "c"].map((k) => kid(card, k).slot.hidden), [true, true, true, false, false]);
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home"].hidden, ["h1", "a", "b"]);
+
+  click(card._btn);
+  click(button(card, "Show a hidden card…"));
+  click(all(card, (el) => el.localName === "button" && /^h1 /.test(el.textContent))[0]);
+  await tick();
+  assert.ok(["h1", "a", "b"].every((k) => !kid(card, k).slot.hidden));
+
+  const plain = await mount(three(), { hass: fakeHass() });
+  fire(kid(plain, "b").el, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.equal(all(plain, (el) => el.textContent === "Hide this group").length, 0);
+});
+
+test("editor: a group is removed in one press", () => {
+  const cards = [{ id: "h1", type: "heading" }, { id: "a", type: "one" }, { id: "b", type: "two" }, { id: "h2", type: "heading" }, { id: "c", type: "three" }, { id: "h3", type: "heading" }];
+  const { ed, last } = editor({ type: "custom:arrange-grid-card", cards });
+  const sweep = all(ed, (el) => /^Remove the group/.test(el.title || ""));
+  assert.equal(sweep.length, 2); // not on a heading with nothing under it
+  click(sweep[0]);
+  assert.deepEqual(last().cards.map((c) => c.id), ["h2", "c", "h3"]);
+  const off = editor({ type: "custom:arrange-grid-card", groups: false, cards });
+  assert.equal(all(off.ed, (el) => /^Remove the group/.test(el.title || "")).length, 0);
+});
+
+const group = (id, title, cards) => ({ id, type: "custom:arrange-grid-card", title, cards });
+const nestedPage = () => ({ type: "custom:arrange-grid-card", cards: [group("lights", "Lights", [small("x"), small("y"), group("room", "Room", [small("z")])]), small("a")] });
+
+test("nested groups: a grid card inside another is a box with a title and an arrangement of its own", async () => {
+  const hass = fakeHass();
+  const card = await mount(nestedPage(), { hass });
+  await tick();
+  const lights = kid(card, "lights").el;
+  assert.equal(lights.localName, "arrange-grid-card");
+  assert.equal(lights._config.name, "/dashboard-test/home/lights");
+  assert.equal(lights.getAttribute("nested"), "");
+  assert.equal(byClass(lights, "head")[0].hidden, false);
+  assert.equal(byClass(lights, "title")[0].textContent, "Lights");
+  assert.equal(lights._foot.hidden, true); // no button of its own
+  assert.equal(byClass(card, "head")[0].hidden, true); // the page has no title
+  // inside, a section's 12 columns are the whole group
+  assert.deepEqual([place(lights, "x"), place(lights, "y")].map((p) => [p.c, p.w]), [[0, 4], [4, 4]]);
+  assert.equal(place(lights, "room").w, 12);
+  const room = kid(lights, "room").el;
+  assert.equal(room._config.name, "/dashboard-test/home/lights/room");
+  // in the outer grid it is one card, as wide as a section
+  assert.equal(place(card, "lights").w, 3);
+
+  // arranged inside: kept under the group's own name, the page's untouched
+  fire(kid(lights, "x").el, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.ok(!card._menu && lights._menu); // the group answers for itself
+  click(button(lights, "Arrange inside this group…"));
+  drag(lights, "x", at(0, 0), at(8, 0));
+  click(button(lights, "Done"));
+  await tick();
+  assert.equal(place(lights, "x").c, 8);
+  assert.deepEqual(Object.keys(hass.userData.layouts), ["/dashboard-test/home/lights"]);
+  // and the page's own save does not lose it
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  drag(card, "a", at(3, 0), at(6, 0));
+  click(button(card, "Done"));
+  await tick();
+  assert.deepEqual(Object.keys(hass.userData.layouts).sort(), ["/dashboard-test/home", "/dashboard-test/home/lights"]);
+});
+
+test("nested groups: the page decides grid or list for them, and in the list they fold shut", async () => {
+  const hass = fakeHass();
+  const card = await mount(nestedPage(), { width: 400, hass });
+  await tick();
+  const lights = kid(card, "lights").el;
+  const room = kid(lights, "room").el;
+  assert.ok(lights._grid.classList.contains("list") && room._grid.classList.contains("list"));
+  const fold = byClass(lights, "shutter")[0];
+  assert.equal(fold.hidden, false);
+  click(fold);
+  await tick();
+  assert.equal(lights._grid.hidden, true);
+  assert.equal(fold.getAttribute("aria-expanded"), "false");
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home"].folded, ["lights"]);
+  click(byClass(lights, "head")[0]); // the title opens it again
+  await tick();
+  assert.equal(lights._grid.hidden, false);
+  click(byClass(room, "shutter")[0]); // a group in a group, on its own
+  await tick();
+  assert.deepEqual([room._grid.hidden, lights._grid.hidden], [true, false]);
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home/lights"].folded, ["room"]);
+
+  const wide = await mount(nestedPage(), { hass });
+  await tick();
+  const w = kid(wide, "lights").el;
+  assert.equal(w._grid.classList.contains("list"), false);
+  assert.equal(byClass(w, "shutter")[0].hidden, true); // nothing folds on the wide grid
+  assert.equal(kid(w, "room").el._grid.hidden, false);
+});
+
+test("nested groups: the group's menu reaches the page, and the editor adds one", async () => {
+  const hass = fakeHass();
+  const card = await mount(nestedPage(), { hass });
+  await tick();
+  const lights = kid(card, "lights").el;
+  fire(lights._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.ok(lights._menu && !card._menu);
+  click(button(lights, "Hide this group"));
+  await tick();
+  assert.equal(kid(card, "lights").slot.hidden, true);
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home"].hidden, ["lights"]);
+
+  const { ed, last } = editor({ type: "custom:arrange-grid-card", cards: [{ id: "k", type: "one" }] });
+  click(button(ed, "Add group"));
+  const added = last().cards[1];
+  assert.deepEqual([added.type, added.title, added.cards], ["custom:arrange-grid-card", "New group", []]);
+  assert.equal(typeof added.id, "string");
+});
+
+// The page as the dashboard has it, so that the card can find itself there.
+async function onDashboard(config, opts = {}) {
+  const hass = fakeHass({ lovelace: { views: [{ cards: [config] }] }, ...opts });
+  const card = await mount(config, { hass });
+  await tick();
+  return { hass, card, saved: () => hass.lovelace.views[0].cards[0] };
+}
+const ids = (node) => node.cards.map((c) => c.id);
+
+test("moving between groups: the menu lists the page's groups and rewrites the dashboard", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  const lights = kid(card, "lights").el;
+  fire(kid(lights, "x").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(lights, "Move to…"));
+  assert.deepEqual(all(byClass(lights, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent), ["The page", "Lights › Room"]);
+  click(button(lights, "Lights › Room"));
+  await tick();
+  assert.deepEqual(ids(saved()), ["lights", "a"]);
+  assert.deepEqual(ids(saved().cards[0]), ["y", "room"]);
+  assert.deepEqual(ids(saved().cards[0].cards[1]), ["z", "x"]);
+  assert.match(card._bar.textContent, /moved to Room/);
+  assert.equal(saved().cards[0].nested, undefined); // nothing of the card's own making is written
+
+  // out to the page, where the id is taken already: it gets one of its own
+  const taken = nestedPage();
+  taken.cards[0].cards[0].id = "a";
+  const two = await onDashboard(taken);
+  const g = kid(two.card, "lights").el;
+  fire(kid(g, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(g, "Move to…"));
+  click(button(g, "The page"));
+  await tick();
+  assert.deepEqual(ids(two.saved()), ["lights", "a", "a-2"]);
+
+  // a whole group, from its own menu; never into itself
+  const three_ = await onDashboard(nestedPage());
+  const room = kid(kid(three_.card, "lights").el, "room").el;
+  fire(room._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(room, "Move this group to…"));
+  assert.deepEqual(all(byClass(room, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent), ["The page"]);
+  click(button(room, "The page"));
+  await tick();
+  assert.deepEqual(ids(three_.saved()), ["lights", "a", "room"]);
+});
+
+test("one Arrange for the page and its groups: every card can be taken hold of, one bar, one Done", async () => {
+  const hass = fakeHass();
+  const card = await mount(nestedPage(), { hass });
+  await tick();
+  const lights = kid(card, "lights").el;
+  const room = kid(lights, "room").el;
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  assert.deepEqual([card._arranging, lights._arranging, room._arranging], [true, true, true]);
+  assert.deepEqual([card._bar.hidden, lights._bar.hidden, room._bar.hidden], [false, true, true]);
+  assert.ok(kid(card, "lights").arr.classList.contains("frame")); // the group's own overlay leaves its cards free
+  assert.equal(kid(card, "a").arr.classList.contains("frame"), false);
+  // the page's cells are not drawn under a group, which draws its own
+  const under = card._arrCellEls.filter((c) => c.classList.contains("under")).map((c) => parseInt(c.style.gridColumn, 10) - 1);
+  assert.deepEqual([...new Set(under)].sort((x, y) => x - y), [0, 1, 2]);
+  assert.equal(lights._arrCellEls.some((c) => c.classList.contains("under")), true); // (its own, under the group in it)
+  assert.equal(kid(lights, "room").el._arrCellEls.some((c) => c.classList.contains("under")), false);
+  drag(lights, "x", at(0, 0), at(8, 0)); // a card inside a group, without opening the group first
+  assert.equal(place(lights, "x").c, 8);
+  fire(kid(lights, "x").arr, "keydown", { key: "ArrowRight" }); // at the edge already
+  assert.equal(place(lights, "x").c, 8);
+  click(button(card, "Done"));
+  await tick();
+  assert.deepEqual([card._arranging, lights._arranging, room._arranging], [false, false, false]);
+  // the group that was changed keeps its arrangement; the one nobody touched keeps none
+  assert.deepEqual(Object.keys(hass.userData.layouts).sort(), ["/dashboard-test/home", "/dashboard-test/home/lights"]);
+  assert.equal(hass.userData.layouts["/dashboard-test/home/lights"].tiles.find((t) => t.id === "x").c, 8);
+
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  drag(lights, "x", at(8, 0), at(0, 0));
+  assert.equal(place(lights, "x").c, 0);
+  fire(dom.win, "keydown", { key: "Escape" }); // Cancel is for all of it
+  assert.equal(lights._arranging, false);
+  assert.equal(place(lights, "x").c, 8);
+});
+
+test("one Arrange: right-click on a group's title sizes its grid; Done fits each group to its cards", async () => {
+  const hass = fakeHass();
+  const page = nestedPage();
+  page.default_layout = { grid: { cols: 12, rows: 9 }, tiles: [{ id: "lights", c: 0, r: 0, w: 6, h: 9 }, { id: "a", c: 6, r: 0, w: 1, h: 1 }] };
+  const card = await mount(page, { hass });
+  await tick();
+  const lights = kid(card, "lights").el;
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  const ev = fire(byClass(kid(card, "lights").arr, "grip")[0], "contextmenu", { clientX: 10, clientY: 10 });
+  assert.equal(ev.defaultPrevented, true);
+  const items = () => all(byClass(card, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent);
+  assert.deepEqual(items(), ["Columns: 12  ·  one more", "Columns: one fewer", `Rows: ${lights._arrEdit.grid.rows}  ·  one more`, "Rows: one fewer", "Fit the group's height to its cards", "Add group inside…", "Delete this group"]);
+  click(button(card, "Columns: 12  ·  one more"));
+  assert.equal(lights._arrEdit.grid.cols, 13);
+  assert.equal(items()[0], "Columns: 13  ·  one more"); // the menu stays, with the new count
+  fire(dom.win, "keydown", { key: "Escape" });
+  assert.equal(card._arranging, true); // Esc closed the menu, not Arrange
+
+  // inside the group, on an empty part: the same for that grid
+  fire(lights._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.equal(all(byClass(lights, "menu")[0], (el) => el.localName === "button")[0].textContent, "Columns: 13  ·  one more");
+  click(button(lights, "Fit the group's height to its cards"));
+  const need = lights._groupRows(true); // as it is drawn while arranging, spare row and all
+  assert.ok(need < 9);
+  assert.equal(place(card, "lights").h, need);
+
+  // and it cannot be made shorter than that by hand: its rows would stretch, and the neighbours with them
+  fire(kid(card, "lights").arr, "keydown", { key: "ArrowUp", shiftKey: true });
+  assert.equal(place(card, "lights").h, need);
+  assert.match(byClass(card, "why")[0].textContent, /as short as it goes/);
+  fire(kid(card, "lights").arr, "keydown", { key: "ArrowDown", shiftKey: true }); // taller is fine
+  assert.equal(place(card, "lights").h, need + 1);
+  // an ordinary card is measured on screen
+  kid(card, "a").slot.scrollHeight = 150; // what is in it needs three rows
+  for (let i = 0; i < 4; i++) fire(kid(card, "a").arr, "keydown", { key: "ArrowDown", shiftKey: true });
+  assert.equal(place(card, "a").h, 5);
+  for (let i = 0; i < 4; i++) fire(kid(card, "a").arr, "keydown", { key: "ArrowUp", shiftKey: true });
+  assert.equal(place(card, "a").h, 3);
+  click(button(card, "Cancel"));
+
+  // and Done does it for every group by itself
+  const other = await mount(page, { hass: fakeHass() });
+  await tick();
+  click(other._btn);
+  click(button(other, "Arrange…"));
+  assert.equal(place(other, "lights").h, kid(other, "lights").el._groupRows(true)); // its box follows it at once
+  click(button(other, "Done"));
+  await tick();
+  assert.equal(place(other, "lights").h, kid(other, "lights").el._groupRows());
+});
+
+test("one Arrange: a card too short for what is in it gets the rows it needs, and what is under it moves down", async () => {
+  const page = { ...three(), default_layout: { grid: { cols: 12, rows: 5 }, tiles: [{ id: "a", c: 0, r: 0, w: 2, h: 1 }, { id: "b", c: 1, r: 1, w: 2, h: 1 }, { id: "c", c: 2, r: 4, w: 1, h: 1 }] } };
+  const card = await mount(page, { hass: fakeHass() });
+  kid(card, "a").slot.scrollHeight = 200; // four rows' worth: until now its row was stretched to hold it
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  assert.deepEqual([place(card, "a").r, place(card, "a").h], [0, 4]);
+  assert.deepEqual([place(card, "b").r, place(card, "c").r], [4, 5]); // b was under it, and lands on c, which moves in turn
+  assert.equal(overlaps(card._arrEdit.tiles), false);
+  assert.deepEqual(L.push({ tiles: [] }, { c: 0, r: 498, w: 1, h: 1 }, 5), null); // never past the last row
+});
+
+test("one Arrange: a group is added from the menu while arranging, and Cancel takes it away again", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  const before = JSON.stringify(saved());
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  fire(card._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(card, "Add group…"));
+  const field = all(byClass(card, "menu")[0], (el) => el.localName === "input")[0];
+  field.value = "Kitchen";
+  fire(field, "keydown", { key: "Enter" });
+  await tick();
+  assert.deepEqual(ids(saved()), ["lights", "a", "kitchen"]);
+  document.body.replaceChildren(); // the page is redrawn: Arrange is open again
+  const again = await mount(saved(), { hass });
+  await tick();
+  assert.equal(again._arranging, true);
+  // inside a group, from its title bar
+  fire(byClass(kid(again, "lights").arr, "grip")[0], "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(again, "Add group inside…"));
+  all(byClass(again, "menu")[0], (el) => el.localName === "input")[0].value = "Desk";
+  click(button(again, "Add"));
+  await tick();
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "room", "desk"]);
+  document.body.replaceChildren();
+  const third = await mount(saved(), { hass });
+  await tick();
+  click(button(third, "Cancel"));
+  await tick();
+  await tick();
+  assert.equal(JSON.stringify(saved()), before);
+});
+
+test("one Arrange: while dragging, only the grid under the pointer has a spare row", async () => {
+  const card = await mount(nestedPage(), { hass: fakeHass() });
+  await tick();
+  const lights = kid(card, "lights").el;
+  card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  lights.rect = { left: 0, top: 0, width: 300, height: 300 };
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  const rows = () => [card._arrEdit.grid.rows, lights._arrEdit.grid.rows];
+  const before = rows();
+  const arr = kid(card, "a").arr;
+  fire(arr, "pointerdown", { pointerId: 1, button: 0, pointerType: "mouse", clientX: 350, clientY: 25 });
+  fire(arr, "pointermove", { pointerId: 1, clientX: 700, clientY: 30 }); // over the page
+  assert.ok(card._arrEdit.grid.rows > L.bottom(card._arrEdit.tiles)); // an empty row under the page's last card
+  assert.equal(lights._arrEdit.grid.rows, before[1]); // and none in the group
+  fire(arr, "pointermove", { pointerId: 1, clientX: 150, clientY: 150 }); // over the group
+  assert.deepEqual(rows(), [before[0], before[1] + 1]);
+  fire(arr, "pointermove", { pointerId: 1, clientX: 700, clientY: 30 });
+  fire(arr, "pointerup", { pointerId: 1, clientX: 700, clientY: 30 });
+  assert.deepEqual(rows(), before); // and none once it is let go
+});
+
+test("one Arrange: a card dropped on another group lands where it was dropped, Arrange goes on, Cancel takes it back", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  const before = JSON.stringify(saved());
+  const lights = kid(card, "lights").el;
+  card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  lights.rect = { left: 0, top: 0, width: 1200, height: 300 };
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  drag(card, "a", at(3, 0), at(8, 0)); // onto the group, at its free cell 8, 0
+  await tick();
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "room", "a"]);
+  const tile = hass.userData.layouts["/dashboard-test/home/lights"].tiles.find((t) => t.id === "a");
+  assert.deepEqual([tile.c, tile.r, tile.w], [8, 0, 4]); // and at a section's size in there, not the page's
+
+  // Home Assistant redraws the page from the new config: Arrange is open again
+  document.body.replaceChildren();
+  const again = await mount(saved(), { hass });
+  await tick();
+  const g = kid(again, "lights").el;
+  assert.deepEqual([again._arranging, g._arranging], [true, true]);
+  assert.deepEqual([place(g, "a").c, place(g, "a").r], [8, 0]);
+  click(button(again, "Cancel"));
+  await tick();
+  await tick();
+  assert.equal(JSON.stringify(saved()), before); // back in its group
+  assert.equal(hass.userData.layouts["/dashboard-test/home/lights"], undefined); // and the arrangements as they were
+
+  // Done instead: it stays, and a reload does not open Arrange again
+  dom.session.clear();
+  const two = await onDashboard(nestedPage());
+  two.card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  kid(two.card, "lights").el.rect = { left: 0, top: 0, width: 1200, height: 300 };
+  click(two.card._btn);
+  click(button(two.card, "Arrange…"));
+  drag(two.card, "a", at(3, 0), at(8, 0));
+  await tick();
+  document.body.replaceChildren();
+  const next = await mount(two.saved(), { hass: two.hass });
+  await tick();
+  click(button(next, "Done"));
+  await tick();
+  document.body.replaceChildren();
+  const later = await mount(two.saved(), { hass: two.hass });
+  await tick();
+  assert.ok(!later._arranging);
+  assert.deepEqual(ids(two.saved().cards[0]), ["x", "y", "room", "a"]);
+});
+
+test("one Arrange in the list: a row dragged onto another group goes into it, at the row it was dropped on", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage(), {});
+  document.body.replaceChildren();
+  const narrow = await mount(saved(), { width: 400, hass });
+  await tick();
+  const lights = kid(narrow, "lights").el;
+  narrow.rect = { left: 0, top: 0, width: 400, height: 900 };
+  lights.rect = { left: 0, top: 0, width: 400, height: 400 };
+  kid(lights, "y").slot.rect = { left: 0, top: 100, width: 400, height: 50 };
+  click(narrow._btn);
+  click(button(narrow, "Arrange…"));
+  assert.ok(lights._arranging && lights._arrMode === "list");
+  drag(narrow, "a", [10, 500], [10, 120], { pointerType: "touch", handle: "grip" });
+  await tick();
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "room", "a"]);
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home/lights"].list, ["x", "a", "y", "room"]);
+});
+
+test("adding a group from the menu: on the page or inside a group, with an id made from its title", async () => {
+  const { card, saved } = await onDashboard(nestedPage());
+  click(card._btn);
+  click(button(card, "Add group…"));
+  const field = all(byClass(card, "menu")[0], (el) => el.localName === "input")[0];
+  field.value = "Dining Room";
+  fire(field, "keydown", { key: "Enter" });
+  await tick();
+  assert.deepEqual(saved().cards[2], { id: "dining-room", type: "custom:arrange-grid-card", title: "Dining Room", cards: [] });
+  assert.match(card._bar.textContent, /Group "Dining Room" added/);
+
+  const inner = await onDashboard(nestedPage());
+  const lights = kid(inner.card, "lights").el;
+  fire(lights._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(lights, "Add group inside…"));
+  all(byClass(lights, "menu")[0], (el) => el.localName === "input")[0].value = "Room"; // the id is taken in there
+  click(button(lights, "Add"));
+  await tick();
+  assert.deepEqual(ids(inner.saved().cards[0]), ["x", "y", "room", "room-2"]);
+
+  const guest = await onDashboard(nestedPage(), { admin: false });
+  click(guest.card._btn);
+  assert.equal(button(guest.card, "Add group…"), undefined);
+});
+
+test("hide_add_menu: the header's add menu is hidden while the card is on the page, and put back", async () => {
+  const el = (tag, attrs = {}, kids = []) => {
+    const n = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    n.append(...kids);
+    return n;
+  };
+  const item = (value) => Object.assign(el("ha-dropdown-item"), { value });
+  const add = el("ha-dropdown", { slot: "actionItems" }, [item("ui.panel.lovelace.menu.add_device"), item("ui.panel.lovelace.menu.create_area")]);
+  const other = el("ha-dropdown", { slot: "actionItems" }, [item("ui.panel.lovelace.menu.something_else")]);
+  const root = el("hui-root");
+  root.attachShadow({ mode: "open" }).append(el("div", {}, [add, other]));
+  document.body.append(root);
+  const card = new Card();
+  card.clientWidth = 1200;
+  card.setConfig({ ...three(), hide_add_menu: true });
+  card.hass = fakeHass();
+  root.shadowRoot.append(card);
+  await tick();
+  assert.deepEqual([add.style.display, other.style.display], ["none", undefined]);
+  card.setConfig(three()); // the option taken away
+  assert.notEqual(add.style.display, "none");
+  card.setConfig({ ...three(), hide_add_menu: true });
+  assert.equal(add.style.display, "none");
+  card.remove(); // another view: the header is as it was
+  assert.notEqual(add.style.display, "none");
+  root.remove();
+});
+
+test("moving between groups: only an administrator, and only a dashboard that can be saved", async () => {
+  const guest = await onDashboard(nestedPage(), { admin: false });
+  fire(kid(guest.card, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.equal(button(guest.card, "Move to…"), undefined);
+
+  const yaml = await mount(nestedPage(), { hass: fakeHass() });
+  await tick();
+  fire(kid(yaml, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(yaml, "Move to…"));
+  click(button(yaml, "Lights"));
+  await tick();
+  assert.match(yaml._bar.textContent, /Couldn't move it to Lights/);
+
+  const plain = await onDashboard(three());
+  fire(kid(plain.card, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.equal(button(plain.card, "Move to…"), undefined); // no groups: nowhere to move to
+});
+
+test("moving between groups: a card dragged onto a group, or out of its own, goes there", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  const lights = kid(card, "lights").el;
+  card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  lights.rect = { left: 0, top: 0, width: 300, height: 300 };
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  const arr = kid(card, "a").arr;
+  fire(arr, "pointerdown", { pointerId: 1, button: 0, pointerType: "mouse", clientX: 350, clientY: 25 });
+  fire(arr, "pointermove", { pointerId: 1, clientX: 150, clientY: 150 });
+  assert.equal(lights.classList.contains("dropin"), true);
+  assert.match(byClass(card, "why")[0].textContent, /Drop to move it to Lights/);
+  fire(arr, "pointermove", { pointerId: 1, clientX: 650, clientY: 25 }); // away again: an ordinary move
+  assert.equal(lights.classList.contains("dropin"), false);
+  fire(arr, "pointermove", { pointerId: 1, clientX: 150, clientY: 150 });
+  fire(arr, "pointerup", { pointerId: 1, clientX: 150, clientY: 150 });
+  await tick();
+  assert.equal(card._arranging, false); // what was arranged so far is kept, then the card moves
+  assert.deepEqual(ids(saved()), ["lights"]);
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "room", "a"]);
+
+  // from inside a group, out onto the page
+  dom.session.clear();
+  const out = await onDashboard(nestedPage());
+  const g = kid(out.card, "lights").el;
+  out.card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  g.rect = { left: 0, top: 0, width: 300, height: 300 };
+  fire(g._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(g, "Arrange inside this group…"));
+  drag(g, "y", at(4, 0), [800, 400]);
+  await tick();
+  assert.deepEqual(ids(out.saved()), ["lights", "a", "y"]);
+
+  // a group itself is not dropped into another by dragging
+  dom.session.clear();
+  const grp = await onDashboard({ type: "custom:arrange-grid-card", cards: [group("one", "One", [small("x")]), group("two", "Two", [small("y")])] });
+  grp.card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  kid(grp.card, "two").el.rect = { left: 300, top: 0, width: 300, height: 300 };
+  click(grp.card._btn);
+  click(button(grp.card, "Arrange…"));
+  drag(grp.card, "one", at(0, 0), [450, 150]);
+  await tick();
+  assert.deepEqual(ids(grp.saved()), ["one", "two"]);
+});
+
+test("badges: a centred row over the grid, kept while they do not change", async () => {
+  const hass = fakeHass();
+  const config = { ...three(), badges: ["sensor.one", { entity: "sensor.two", name: "Two" }] };
+  const card = await mount(config, { hass });
+  const row = byClass(card, "badges")[0];
+  assert.equal(row.hidden, false);
+  assert.deepEqual(row.children.map((el) => el.config), [{ type: "entity", entity: "sensor.one" }, { type: "entity", entity: "sensor.two", name: "Two" }]);
+  assert.ok(row.children.every((el) => el.hass === hass));
+  const first = row.children[0];
+  card.setConfig({ ...config, columns: 6 });
+  await tick();
+  assert.equal(row.children[0], first);
+  const next = fakeHass();
+  card.hass = next;
+  assert.equal(first.hass, next);
+  assert.equal(byClass(await mount(three()), "badges")[0].hidden, true);
+});
+
+const bin = [600, 760]; // a point on the bin, once a test has said where it is
+const withBin = (card) => {
+  card._trash.rect = { left: 500, top: 730, width: 200, height: 50 };
+};
+
+test("the bin: a card dropped on it is off the page once Done is pressed; Undo and Cancel bring it back", async () => {
+  const hass = fakeHass();
+  const card = await mount(three(), { hass });
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  withBin(card);
+  const arr = kid(card, "b").arr;
+  fire(arr, "pointerdown", { pointerId: 1, button: 0, pointerType: "mouse", clientX: 150, clientY: 25 });
+  assert.equal(card._trash.classList.contains("show"), false); // only while something is dragged
+  fire(arr, "pointermove", { pointerId: 1, clientX: 460, clientY: 300 });
+  assert.deepEqual([card._trash.classList.contains("show"), card._trash.classList.contains("over")], [true, false]);
+  fire(arr, "pointermove", { pointerId: 1, clientX: bin[0], clientY: bin[1] });
+  assert.equal(card._trash.classList.contains("over"), true);
+  fire(arr, "pointerup", { pointerId: 1, clientX: bin[0], clientY: bin[1] });
+  assert.equal(card._trash.classList.contains("show"), false);
+  assert.equal(kid(card, "b").slot.hidden, true);
+  assert.match(byClass(card, "undo")[0].textContent, /^b · fake will be deleted when you press Done/);
+  assert.equal(hass.userData, null); // nothing is kept yet
+
+  click(button(card, "Undo"));
+  assert.equal(kid(card, "b").slot.hidden, false);
+  assert.equal(place(card, "b").c, 1);
+  assert.equal(byClass(card, "undo")[0].hidden, true);
+
+  drag(card, "b", at(1, 0), bin);
+  drag(card, "a", at(0, 0), at(6, 2)); // another change: the offer to undo goes
+  assert.equal(byClass(card, "undo")[0].hidden, true);
+  click(button(card, "Cancel"));
+  assert.equal(kid(card, "b").slot.hidden, false);
+  assert.equal(hass.userData, null);
+
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  fire(kid(card, "c").arr, "keydown", { key: "Delete" }); // the keyboard's way
+  click(button(card, "Done"));
+  await tick();
+  assert.equal(kid(card, "c").slot.hidden, true);
+  assert.equal(kid(card, "c").el.isConnected, false);
+  assert.deepEqual(hass.userData.layouts["/dashboard-test/home"].hidden, ["c"]);
+  click(card._btn);
+  click(button(card, "Show a hidden card…"));
+  click(button(card, "c · fake"));
+  await tick();
+  assert.equal(kid(card, "c").slot.hidden, false);
+});
+
+test("the bin deletes: on Done the card leaves the dashboard, for an administrator; otherwise it is hidden", async () => {
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  const lights = kid(card, "lights").el;
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  withBin(card);
+  withBin(lights);
+  assert.equal(card._trashText.textContent, "Drop here to delete it");
+  drag(card, "a", at(3, 0), bin);
+  drag(lights, "x", at(0, 0), bin); // one inside a group as well
+  assert.deepEqual(ids(saved()), ["lights", "a"]); // nothing yet
+  click(button(card, "Done"));
+  await tick();
+  assert.deepEqual(ids(saved()), ["lights"]);
+  assert.deepEqual(ids(saved().cards[0]), ["y", "room"]);
+  assert.match(card._bar.textContent, /2 cards deleted from the dashboard/);
+  const kept = (hass.userData && hass.userData.layouts) || {};
+  assert.ok(Object.values(kept).every((l) => !l.hidden)); // gone, not hidden: Reset layout has nothing to bring back
+
+  // Cancel: nothing is deleted
+  dom.session.clear();
+  const two = await onDashboard(nestedPage());
+  click(two.card._btn);
+  click(button(two.card, "Arrange…"));
+  withBin(two.card);
+  drag(two.card, "a", at(3, 0), bin);
+  click(button(two.card, "Cancel"));
+  await tick();
+  assert.deepEqual(ids(two.saved()), ["lights", "a"]);
+
+  // someone who may not edit the dashboard: hidden, their own
+  dom.session.clear();
+  const guest = await onDashboard(nestedPage(), { admin: false });
+  click(guest.card._btn);
+  click(button(guest.card, "Arrange…"));
+  withBin(guest.card);
+  assert.equal(guest.card._trashText.textContent, "Drop here to hide it");
+  drag(guest.card, "a", at(3, 0), bin);
+  click(button(guest.card, "Done"));
+  await tick();
+  assert.deepEqual(ids(guest.saved()), ["lights", "a"]);
+  assert.deepEqual(guest.hass.userData.layouts["/dashboard-test/home"].hidden, ["a"]);
+});
+
+test("the bin: what is in it stays in it while a card changes groups, and goes on Done", async () => {
+  const { hass, card, saved } = await onDashboard({ type: "custom:arrange-grid-card", cards: [group("lights", "Lights", [small("x"), small("y")]), small("a"), small("b")] });
+  const lights = kid(card, "lights").el;
+  card.rect = { left: 0, top: 0, width: 1200, height: 600 };
+  lights.rect = { left: 0, top: 0, width: 300, height: 300 };
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  card._trash.rect = { left: 500, top: 730, width: 200, height: 50 };
+  drag(card, "b", at(4, 0), bin);
+  drag(card, "a", at(3, 0), [150, 150]); // into the group: the page is redrawn
+  await tick();
+  assert.deepEqual(ids(saved()), ["lights", "b"]); // b is still there: not deleted before Done
+  document.body.replaceChildren();
+  const again = await mount(saved(), { hass });
+  await tick();
+  assert.equal(again._arranging, true);
+  assert.equal(kid(again, "b").slot.hidden, true); // and still in the bin
+  click(button(again, "Done"));
+  await tick();
+  assert.deepEqual(ids(saved()), ["lights"]);
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "a"]);
+});
+
+test("the bin: a selected group goes as one; a finger drags by the grip", async () => {
+  const hass = fakeHass();
+  const card = await mount(grouped(), { hass });
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  withBin(card);
+  drag(card, "h1", at(0, 0), bin, { pointerType: "touch", handle: "grip" }); // not selected: the heading alone
+  assert.deepEqual(["h1", "a", "b"].map((k) => kid(card, k).slot.hidden), [true, false, false]);
+  click(button(card, "Undo"));
+  click(byClass(kid(card, "h1").arr, "pick")[0]);
+  drag(card, "a", at(3, 0), bin, { pointerType: "touch", handle: "grip" });
+  assert.deepEqual(["h1", "a", "b", "h2", "c"].map((k) => kid(card, k).slot.hidden), [true, true, true, false, false]);
+  assert.match(byClass(card, "undo")[0].textContent, /^3 cards will be deleted when you press Done/);
+  drag(card, "c", at(8, 0), at(0, 0)); // the cells they left are free
+  assert.equal(place(card, "c").c, 0);
+  click(button(card, "Done"));
+  await tick();
+  const kept = hass.userData.layouts["/dashboard-test/home"];
+  assert.deepEqual(kept.hidden, ["h1", "a", "b"]);
+  assert.deepEqual(kept.tiles.map((t) => t.id).sort(), ["c", "h2"]);
+});
+
+test("the bin: in the list every card has a button for it, and a heading takes its cards", async () => {
+  const hass = fakeHass();
+  const card = await mount(grouped(), { width: 400, hass });
+  click(card._btn);
+  click(button(card, "Arrange…"));
+  click(byClass(kid(card, "c").arr, "rm")[0]);
+  assert.equal(kid(card, "c").slot.hidden, true);
+  click(button(card, "Undo"));
+  assert.equal(kid(card, "c").slot.hidden, false);
+  click(byClass(kid(card, "h1").arr, "rm")[0]);
+  assert.deepEqual(["h1", "a", "b", "h2", "c"].map((k) => kid(card, k).slot.hidden), [true, true, true, false, false]);
+  withBin(card);
+  drag(card, "c", [10, 225], bin, { pointerType: "touch", handle: "grip" });
+  assert.equal(kid(card, "c").slot.hidden, true);
+  click(button(card, "Done"));
+  await tick();
+  const kept = hass.userData.layouts["/dashboard-test/home"];
+  assert.deepEqual(kept.hidden, ["h1", "a", "b", "c"]);
+  assert.deepEqual(kept.list, ["h2"]);
 });
 
 test("what Home Assistant's dashboard asks of a card", async () => {
