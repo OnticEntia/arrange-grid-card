@@ -4,6 +4,8 @@ A Home Assistant dashboard card that holds other cards on a grid you arrange by 
 
 It is meant to be the only card of a panel view, so it fills the page, but it works inside any view.
 
+![A dashboard arranged with the card: groups of cards side by side, each at its own size, with a row of badges on top](images/dashboard.webp)
+
 ## Install
 
 ### With HACS
