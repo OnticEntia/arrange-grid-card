@@ -24,7 +24,7 @@
  * https://github.com/OnticEntia/arrange-grid-card (MIT)
  */
 
-const VERSION = "0.14.0";
+const VERSION = "0.15.0";
 const TAG = "arrange-grid-card";
 const USER_KEY = "arrange_grid_card"; // frontend user data
 const LOCAL_KEY = "arrange-grid-card:layout:"; // + layout name, in localStorage
@@ -32,6 +32,7 @@ const RESUME_KEY = "arrange-grid-card:resume:"; // + layout name, in sessionStor
 const FOLD_KEY = "arrange-grid-card:folded:"; // + layout name (only with `storage: config`)
 const PREV_KEY = "arrange-grid-card:previous:"; // + the page's layout name: the arrangements before the last changes
 const PREV_KEEP = 5; // that many previous arrangements are kept for each page
+const EDIT_DIALOG = "hui-dialog-edit-card"; // Home Assistant's own dialog for editing a card
 const UNDO_KEEP = 50; // steps of one Arrange that Undo can take back
 const MAX_COLS = 48;
 const MAX_ROWS = 400;
@@ -743,6 +744,105 @@ class ArrangeGridCard extends HTMLElement {
       root._note("Couldn't add the card: that takes an administrator and a dashboard edited in Home Assistant's UI. Add it in the card's editor instead.", 9000);
       return false;
     }
+  }
+
+  // ------------------------------------------------- editing a card
+  //
+  // "Edit this card…" opens Home Assistant's own edit-card dialog (the
+  // card's visual editor or YAML, with the preview) for one of this grid's
+  // cards, and writes what it saves back into the dashboard at the card's
+  // place. The dialog is asked for as the frontend asks for it: a
+  // `show-dialog` event naming it, with the card's config and a
+  // `saveCardConfig` to call. None of that is a public API.
+
+  // The frontend's own way of loading the dialog (it is not loaded until a
+  // card is first edited). The view answers `ll-edit-card` by asking for
+  // the dialog with it: that request is caught here before it is shown, and
+  // only the loader is kept. Null when it cannot be had.
+  _dialogImport(conf) {
+    if (customElements.get(EDIT_DIALOG)) return () => Promise.resolve();
+    let path = null;
+    ((conf && conf.views) || []).some((v, i) => {
+      if (!v || typeof v !== "object") return false;
+      if (Array.isArray(v.cards) && v.cards.length) path = [i, 0];
+      else (Array.isArray(v.sections) ? v.sections : []).some((sec, j) => (sec && Array.isArray(sec.cards) && sec.cards.length ? !!(path = [i, j, 0]) : false));
+      return !!path;
+    });
+    if (!path) return null;
+    let load = null;
+    const grab = (ev) => {
+      const d = ev.detail || {};
+      if (d.dialogTag !== EDIT_DIALOG) return;
+      ev.stopPropagation();
+      if (typeof ev.stopImmediatePropagation === "function") ev.stopImmediatePropagation();
+      load = d.dialogImport;
+    };
+    window.addEventListener("show-dialog", grab, true);
+    try {
+      this.dispatchEvent(new CustomEvent("ll-edit-card", { bubbles: true, composed: true, detail: { path } }));
+    } finally {
+      window.removeEventListener("show-dialog", grab, true);
+    }
+    return typeof load === "function" ? load : null;
+  }
+
+  // Opens the editor for one of this grid's cards (a group among them is
+  // edited with this card's own editor: its title, icon and cards).
+  async _editCard(kid) {
+    const root = this._rootGrid();
+    const at = this._kids.indexOf(kid);
+    const raw = at >= 0 ? this._config.cards[at] : null;
+    if (!raw) return false;
+    if (!this._mayMove()) return root._note("Only an administrator can edit the dashboard's cards.", 6000), false;
+    const ll = this._lovelace();
+    if (ll && ll.mode === "yaml") return root._note("This dashboard is kept in YAML: edit the card there.", 8000), false;
+    const path = this._pathFromRoot();
+    let conf = ll && ll.config;
+    if (!conf) {
+      try {
+        const first = location.pathname.split("/")[1] || "";
+        conf = await this._hass.callWS({ type: "lovelace/config", url_path: !first || first === "lovelace" ? null : first, force: false });
+      } catch (err) {
+        return root._note("This dashboard cannot be saved from here (it is kept in YAML, or Home Assistant didn't answer): edit the card in its file.", 9000), false;
+      }
+    }
+    const load = this._dialogImport(conf);
+    if (!load) return root._note("Home Assistant's card editor could not be opened from here. Edit the card in the grid card's own editor: Edit dashboard, the grid card, then Cards.", 10000), false;
+    const saveCardConfig = async (next) => {
+      if (!next || typeof next !== "object" || Array.isArray(next) || !next.type) throw new Error("A card needs a type.");
+      // (while arranging: what was arranged so far is kept, and the Arrange goes on after the redraw)
+      const lead = this._arranging ? this._arrLead || this : null;
+      if (lead && lead._arrSession) {
+        const session = lead._arrSession;
+        session.gone = lead._goneAll();
+        session.saved = true;
+        lead._resumeSave(session);
+        lead._arrExit("save", true);
+      }
+      try {
+        await this._dashEdit((page, down) => {
+          const node = down(path);
+          const cur = node && Array.isArray(node.cards) ? node.cards[at] : null;
+          if (!cur || cur.type !== raw.type || String(cur.id) !== String(raw.id)) throw new Error("card not found in the dashboard");
+          // (its id is what its place is kept under: it stays as it was)
+          const { id, ...rest } = next;
+          node.cards[at] = raw.id == null ? rest : { ...rest, id: raw.id };
+        });
+      } catch (err) {
+        if (lead) lead._resumeSave(null);
+        throw new Error("The card could not be saved: the dashboard has changed, or it cannot be saved from here. Reload the page and try again.");
+      }
+    };
+    // (while it is open, Esc and Ctrl+Z are the dialog's, not the Arrange's)
+    ArrangeGridCard._dialog = true;
+    const closed = (ev) => {
+      if (ev.detail && ev.detail.dialog && ev.detail.dialog !== EDIT_DIALOG) return;
+      ArrangeGridCard._dialog = false;
+      window.removeEventListener("dialog-closed", closed);
+    };
+    window.addEventListener("dialog-closed", closed);
+    this.dispatchEvent(new CustomEvent("show-dialog", { bubbles: true, composed: true, detail: { dialogTag: EDIT_DIALOG, dialogImport: load, dialogParams: { lovelaceConfig: conf, cardConfig: childConfig(raw), saveCardConfig } } }));
+    return true;
   }
 
   static slug(entity) {
@@ -1875,6 +1975,9 @@ class ArrangeGridCard extends HTMLElement {
       ...(nest ? [kit.item("Hide this group", () => nest._setHidden(nest._kidOf(this).key, true), { disabled: !nest._canArrange() }), kit.item("Arrange the whole page…", () => this._rootGrid()._arrEnter(), { disabled: !nest._canArrange() }),
         ...(moves && !kid ? [kit.item("Move this group to…", () => kit.show(places(nest, nest._kidOf(this))), { stay: true })] : [])] : []),
       ...(kid || !on.length ? [] : [kit.item("Hide a card…", () => kit.show(pick("Hide a card", on, (k) => this._setHidden(k.key, true))), { stay: true, disabled: !may })]),
+      // (a card under a finger has no menu of its own: this is the way to its editor)
+      ...(kid || !on.length || !this._mayMove() ? [] : [kit.item("Edit a card…", () => kit.show(pick("Edit a card", on, (k) => this._editCard(k))), { stay: true })]),
+      ...(nest && !kid && this._mayMove() ? [kit.item("Edit this group…", () => nest._editCard(nest._kidOf(this)))] : []),
       ...(off.length ? [kit.item("Show a hidden card…", () => kit.show(pick("Show a hidden card", off, (k) => this._setHidden(back(k), false))), { stay: true, disabled: !may })] : []),
       ...(this._mayMove()
         ? [
@@ -1890,7 +1993,7 @@ class ArrangeGridCard extends HTMLElement {
     this._menuOpen(
       x,
       y,
-      (kit) => (kid ? [kit.head(kid.name), kit.item("Hide this card", () => this._setHidden(kid.key, true), { disabled: !may }), ...(group ? [kit.item("Hide this group", () => this._setHidden(group, true), { disabled: !may })] : []), ...(moves ? [kit.item("Move to…", () => kit.show(places(this, kid)), { stay: true })] : []), kit.hr(), ...common(kit)] : [kit.head(nest ? this._config.title || "Group" : "Page layout"), ...common(kit)]),
+      (kit) => (kid ? [kit.head(kid.name), kit.item("Hide this card", () => this._setHidden(kid.key, true), { disabled: !may }), ...(group ? [kit.item("Hide this group", () => this._setHidden(group, true), { disabled: !may })] : []), ...(this._mayMove() ? [kit.item(kid.el.localName === TAG ? "Edit this group…" : "Edit this card…", () => this._editCard(kid))] : []), ...(moves ? [kit.item("Move to…", () => kit.show(places(this, kid)), { stay: true })] : []), kit.hr(), ...common(kit)] : [kit.head(nest ? this._config.title || "Group" : "Page layout"), ...common(kit)]),
       opener
     );
   }
@@ -1999,7 +2102,7 @@ class ArrangeGridCard extends HTMLElement {
     // Esc leaves without keeping anything; Ctrl/Cmd+Z takes back a step
     // (Shift with it, or Ctrl+Y: does it again)
     this._arrKey = (ev) => {
-      const held = this._tree().some((g) => g._menu || g._arrBusy);
+      const held = !!ArrangeGridCard._dialog || this._tree().some((g) => g._menu || g._arrBusy);
       const key = String(ev.key || "").toLowerCase();
       if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && (key === "z" || key === "y")) {
         const t = (ev.composedPath ? ev.composedPath() : [])[0];
@@ -2521,6 +2624,8 @@ class ArrangeGridCard extends HTMLElement {
         );
       }
       if (boxKid && outer && outer._arrEdit) out.push(kit.item("Fit the group's height to its cards", () => outer._arrFit(boxKid, true, true)));
+      if (kid && this._mayMove()) out.push(kit.item(box ? "Edit this group…" : "Edit this card…", () => this._editCard(kid)));
+      else if (boxKid && outer && this._mayMove()) out.push(kit.item("Edit this group…", () => outer._editCard(boxKid)));
       const into = box || (kid ? null : this);
       if (into && this._mayMove()) {
         const inside = !!into._outerGrid();

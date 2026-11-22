@@ -83,6 +83,7 @@ Open the menu with the button under the grid, a right-click anywhere on the page
 - **Done** saves, **Cancel** (or Esc) drops the changes.
 - **Reset…** stands apart from those two and asks first, saying what goes and for whom. It goes back to the default arrangement, for the page and every group in it. What was on screen is kept as a previous arrangement, and **Undo reset** is offered right after.
 - **Hide a card… / Show a hidden card…** A hidden card is taken off the page, so it loads and plays nothing, and keeps its place for when it is shown again.
+- **Edit this card…** (right-click on a card, also while arranging; without a right-click, **Edit a card…** in the page's menu lists them) opens Home Assistant's own edit-card dialog for that card: its visual editor where it has one, YAML otherwise, with the preview. Saving writes the card back into the dashboard at its place, on the page or in its group; its `id` stays, so its place in the arrangement does too. On a group it is **Edit this group…** (title, icon and its cards). For an administrator, on a dashboard edited in Home Assistant's UI. While arranging, saving keeps what was arranged so far and Arrange goes on after the redraw; the edit itself is not a step Undo or Cancel takes back. Home Assistant has no public way to open that dialog from a card: this asks for it the way the frontend's own view does (a `show-dialog` event for `hui-dialog-edit-card` with a `saveCardConfig`, the dialog's loader taken from the view's answer to `ll-edit-card`), which a frontend update can break. When it cannot be opened the card says so, and the card can still be edited in the grid card's own editor.
 - **Reset layout…** forgets everything of the user's own: places, sizes, the list's order, what is hidden and what is folded. It asks first, and on a page with groups asks whether the groups go too. With `storage: config` it says that the arrangement is removed for everyone.
 - **Restore a previous arrangement…** Before an arrangement is reset, restored, or changed by an Arrange, what it was is kept: the last five for each page. Picking one brings it back for every grid it was kept for (what it replaces is kept in its turn, so restoring can be taken back as well). They are kept with the user's own data in Home Assistant, so they are there after a reload and on another device.
 
@@ -197,7 +198,7 @@ The arranging model (cells and places, Arrange mode, the one-column list, the me
 
 ## Status
 
-Version 0.14.0. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, undo and redo, reset and the previous arrangements, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
+Version 0.15.0. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, undo and redo, reset and the previous arrangements, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
 
 ## Licence
 

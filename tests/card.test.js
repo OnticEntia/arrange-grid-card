@@ -506,7 +506,10 @@ test("the menu: right-click on a card, even one that swallows the event; Esc and
   assert.equal(menu.style.left, `${1280 - 220 - 8}px`); // kept on screen
   assert.equal(dom.focused.textContent, "Hide this card");
   fire(dom.win, "keydown", { key: "ArrowDown" });
+  assert.equal(dom.focused.textContent, "Edit this card…");
+  fire(dom.win, "keydown", { key: "ArrowDown" });
   assert.equal(dom.focused.textContent, "Arrange…");
+  fire(dom.win, "keydown", { key: "ArrowUp" });
   fire(dom.win, "keydown", { key: "ArrowUp" });
   click(dom.focused);
   await tick();
@@ -875,7 +878,7 @@ test("one Arrange: right-click on a group's title sizes its grid; Done fits each
   const ev = fire(byClass(kid(card, "lights").arr, "grip")[0], "contextmenu", { clientX: 10, clientY: 10 });
   assert.equal(ev.defaultPrevented, true);
   const items = () => all(byClass(card, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent);
-  assert.deepEqual(items(), ["Columns: 12  ·  one more", "Columns: one fewer", `Rows: ${lights._arrEdit.grid.rows}  ·  one more`, "Rows: one fewer", "Fit the group's height to its cards", "Add card here…", "Add group inside…", "Delete this group"]);
+  assert.deepEqual(items(), ["Columns: 12  ·  one more", "Columns: one fewer", `Rows: ${lights._arrEdit.grid.rows}  ·  one more`, "Rows: one fewer", "Fit the group's height to its cards", "Edit this group…", "Add card here…", "Add group inside…", "Delete this group"]);
   click(button(card, "Columns: 12  ·  one more"));
   assert.equal(lights._arrEdit.grid.cols, 13);
   assert.equal(items()[0], "Columns: 13  ·  one more"); // the menu stays, with the new count
@@ -1857,4 +1860,158 @@ test("storage: config: Reset says it is for everyone, and the dashboard's arrang
   await tick();
   assert.deepEqual(saved().default_layout, kept);
   assert.equal(place(card, "a").c, 7);
+});
+
+// ------------------------------------------------------ editing a card
+
+// Home Assistant's view, as far as opening its edit-card dialog goes: asked
+// with `ll-edit-card`, it asks for the dialog with its own loader. `shown`:
+// the requests for a dialog that got through to Home Assistant.
+function withView(t, { answers = true } = {}) {
+  const view = { shown: [], asked: [], load: async () => {} };
+  const onEdit = (ev) => {
+    view.asked.push(ev.detail.path);
+    if (answers) fire(document.body, "show-dialog", {}, { detail: { dialogTag: "hui-dialog-edit-card", dialogImport: view.load, dialogParams: { cardConfig: { type: "the view's own" } } } });
+  };
+  const onShow = (ev) => view.shown.push(ev.detail);
+  dom.win.addEventListener("ll-edit-card", onEdit);
+  dom.win.addEventListener("show-dialog", onShow);
+  t.after(() => {
+    dom.win.removeEventListener("ll-edit-card", onEdit);
+    dom.win.removeEventListener("show-dialog", onShow);
+    Card._dialog = false;
+  });
+  return view;
+}
+const menuItems = (card) => all(byClass(card, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent);
+
+test("Edit this card…: Home Assistant's own dialog opens for the card, and what it saves goes back in its place", async (t) => {
+  const view = withView(t);
+  const mine = { [HOME]: { grid: { cols: 12, rows: 2 }, tiles: [{ id: "b", c: 5, r: 1, w: 2, h: 1 }] } };
+  const { hass, card, saved } = await onDashboard({ ...three(), cards: [small("a"), small("b", { entity: "light.one" }), small("c")] }, { userData: { layouts: mine } });
+  fire(kid(card, "b").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(card, "Edit this card…"));
+  await tick();
+  assert.deepEqual(view.asked, [[0, 0]]); // the view was asked, only to get its loader
+  assert.equal(view.shown.length, 1); // and its own request never reached Home Assistant
+  const d = view.shown[0];
+  assert.equal(d.dialogTag, "hui-dialog-edit-card");
+  assert.equal(d.dialogImport, view.load);
+  assert.deepEqual(d.dialogParams.cardConfig, { type: "fake", grid_options: { columns: 4, rows: 1 }, entity: "light.one" }); // without our id
+  assert.deepEqual(d.dialogParams.lovelaceConfig, hass.lovelace);
+
+  await d.dialogParams.saveCardConfig({ type: "fake", entity: "light.two", sound: "bell", id: "not-this" });
+  assert.deepEqual(saved().cards, [small("a"), { type: "fake", entity: "light.two", sound: "bell", id: "b" }, small("c")]);
+  const { cards, ...rest } = saved();
+  assert.deepEqual(rest, { type: "custom:arrange-grid-card" }); // nothing else of the grid is touched
+  assert.deepEqual(hass.userData.layouts, mine); // nor is the arrangement
+
+  // a card without an id is known by its place: it gets none
+  const two = await onDashboard({ type: "custom:arrange-grid-card", cards: [{ type: "fake" }, { type: "fake", entity: "x" }] });
+  fire(two.card._kids[1].el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(two.card, "Edit this card…"));
+  await tick();
+  await view.shown[1].dialogParams.saveCardConfig({ type: "fake", entity: "y" });
+  assert.deepEqual(two.saved().cards, [{ type: "fake" }, { type: "fake", entity: "y" }]);
+});
+
+test("Edit this card…: inside a group, the group itself, and from the page's menu", async (t) => {
+  const view = withView(t);
+  const { card, saved } = await onDashboard(nestedPage());
+  const lights = kid(card, "lights").el;
+  const room = kid(lights, "room").el;
+  fire(kid(room, "z").el, "contextmenu", { clientX: 10, clientY: 10 }); // two groups deep
+  click(button(room, "Edit this card…"));
+  await tick();
+  await view.shown[0].dialogParams.saveCardConfig({ type: "fake", name: "edited" });
+  assert.deepEqual(saved().cards[0].cards[2].cards, [{ type: "fake", name: "edited", id: "z" }]);
+  assert.deepEqual(ids(saved()), ["lights", "a"]);
+  assert.deepEqual(ids(saved().cards[0]), ["x", "y", "room"]);
+
+  // a group: from its own menu, with this card's editor (its title, icon and cards)
+  const again = await onDashboard(nestedPage());
+  const g = kid(again.card, "lights").el;
+  fire(g._head, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(g, "Edit this group…"));
+  await tick();
+  const d = view.shown[1].dialogParams;
+  assert.deepEqual([d.cardConfig.type, d.cardConfig.title, "id" in d.cardConfig], ["custom:arrange-grid-card", "Lights", false]);
+  await d.saveCardConfig({ ...d.cardConfig, title: "Lamps", icon: "mdi:lamp" });
+  assert.deepEqual([again.saved().cards[0].id, again.saved().cards[0].title, again.saved().cards[0].icon], ["lights", "Lamps", "mdi:lamp"]);
+  assert.deepEqual(ids(again.saved().cards[0]), ["x", "y", "room"]);
+
+  // without a right-click (a finger on a card is the card's): the page's menu lists the cards
+  const third = await onDashboard(three());
+  click(third.card._btn);
+  click(button(third.card, "Edit a card…"));
+  assert.deepEqual(menuItems(third.card), ["a · fake", "b · fake", "c · fake"]);
+  click(button(third.card, "c · fake"));
+  await tick();
+  assert.deepEqual(view.shown[2].dialogParams.cardConfig, { type: "fake", grid_options: { columns: 4, rows: 1 } });
+});
+
+test("Edit this card…: only for an administrator, and it says so when the editor or the dashboard cannot be had", async (t) => {
+  const view = withView(t, { answers: false });
+  const user = await onDashboard(three(), { admin: false });
+  fire(kid(user.card, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  assert.ok(!menuItems(user.card).some((label) => /^Edit/.test(label)));
+  fire(dom.win, "keydown", { key: "Escape" });
+  click(user.card._btn);
+  assert.ok(!menuItems(user.card).some((label) => /^Edit/.test(label)));
+  assert.equal(await user.card._editCard(kid(user.card, "a")), false);
+
+  // the view does not answer (another frontend): no dialog, and a way round
+  const admin = await onDashboard(three());
+  fire(kid(admin.card, "a").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(admin.card, "Edit this card…"));
+  await tick();
+  assert.equal(view.shown.length, 0);
+  assert.match(admin.card._bar.textContent, /card editor could not be opened from here\. Edit the card in the grid card's own editor/);
+
+  // a dashboard kept in YAML
+  const yaml = await mount(three(), { hass: fakeHass() });
+  assert.equal(await yaml._editCard(kid(yaml, "a")), false);
+  assert.match(yaml._bar.textContent, /cannot be saved from here/);
+});
+
+test("Edit this card…: a dashboard that changed meanwhile is not written over", async (t) => {
+  const view = withView(t);
+  const { hass, card, saved } = await onDashboard(three());
+  fire(kid(card, "b").el, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(card, "Edit this card…"));
+  await tick();
+  hass.lovelace.views[0].cards[0].cards.splice(1, 1); // someone removed it elsewhere... and the grid is not the same any more
+  const before = JSON.stringify(saved());
+  await assert.rejects(view.shown[0].dialogParams.saveCardConfig({ type: "fake", entity: "x" }), /could not be saved/);
+  assert.equal(JSON.stringify(saved()), before);
+});
+
+test("Edit this card… while arranging: what was arranged is kept, Arrange goes on, and Esc is the dialog's", async (t) => {
+  const view = withView(t);
+  const { hass, card, saved } = await onDashboard(three());
+  open(card);
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowDown" });
+  fire(kid(card, "b").arr, "contextmenu", { clientX: 150, clientY: 25 });
+  click(button(card, "Edit this card…"));
+  await tick();
+  key({ key: "Escape" }); // the dialog is open: Arrange is not cancelled under it
+  assert.equal(card._arranging, true);
+  fire(dom.win, "dialog-closed", {}, { detail: { dialog: "hui-dialog-edit-card" } });
+  key({ key: "Escape" });
+  assert.equal(card._arranging, false);
+
+  open(card);
+  fire(kid(card, "a").arr, "keydown", { key: "ArrowDown" });
+  fire(kid(card, "b").arr, "contextmenu", { clientX: 150, clientY: 25 });
+  click(button(card, "Edit this card…"));
+  await tick();
+  await view.shown[1].dialogParams.saveCardConfig({ type: "fake", grid_options: { columns: 4, rows: 1 }, name: "new" });
+  await tick();
+  assert.equal(saved().cards[1].name, "new");
+  assert.equal(hass.userData.layouts[HOME].tiles.find((x) => x.id === "a").r, 1);
+  document.body.replaceChildren(); // the page is redrawn
+  const again = await mount(saved(), { hass });
+  await tick();
+  assert.equal(again._arranging, true);
+  assert.equal(place(again, "a").r, 1);
 });
