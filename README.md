@@ -1,0 +1,142 @@
+# Arrange Grid Card
+
+A Home Assistant dashboard card that holds other cards on a grid you arrange by hand: drag a card to any cell, resize it by cells, leave cells empty, add or remove columns and rows. Each Home Assistant user keeps their own arrangement. On a narrow screen the cards are a list instead, with an order of its own.
+
+It is meant to be the only card of a panel view, so it fills the page, but it works inside any view.
+
+## Install
+
+### With HACS
+
+1. In HACS open the menu (three dots) and choose **Custom repositories**.
+2. Add `https://github.com/OnticEntia/arrange-grid-card` with the type **Dashboard**.
+3. Find **Arrange Grid Card** in HACS and download it.
+4. Reload the browser. If the card is not offered in the card picker, add the resource yourself (**Settings → Dashboards → Resources**, type **JavaScript module**):
+
+```
+/hacsfiles/arrange-grid-card/arrange-grid-card.js
+```
+
+### By hand
+
+1. Copy `dist/arrange-grid-card.js` into `<config>/www/` on your Home Assistant.
+2. Add it as a dashboard resource of type **JavaScript module**:
+
+```
+/local/arrange-grid-card.js?v=1
+```
+
+Raise the number after `v=` every time you replace the file, otherwise browsers and the companion app keep the old copy.
+
+The browser console shows `ARRANGE-GRID-CARD v…` once when the card has loaded.
+
+## Use
+
+Add the card, from the card picker ("Arrange Grid") or in YAML:
+
+```yaml
+type: custom:arrange-grid-card
+layout: home
+columns: 24
+cards:
+  - id: porch
+    type: tile
+    entity: light.porch
+  - id: forecast
+    type: weather-forecast
+    entity: weather.home
+```
+
+Give every card an `id`. A saved place is kept under it, so cards can be added, removed and reordered in the config without anything else moving. A card without one is known by its position in the list (`#0`, `#1`, ...), and its saved place then follows the position, not the card. The visual editor gives an id to every card it adds or moves.
+
+## Options
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `cards` | required | The cards, as in a stack card. Any card type. `id` on a card is this card's own key and is not passed on to it. |
+| `columns` | `12` | Columns of the grid while nobody has arranged it. An arrangement keeps its own column count (changed in Arrange mode). 1 to 48. |
+| `row_height` | `56` | Pixels. The least height of a row; 56 with a gap of 8 is what a sections view uses. |
+| `gap` | `8` | Pixels between cells. |
+| `min_width` | `600` | Pixels. When the card itself is narrower than this, the cards are a list. `0` never. |
+| `storage` | `user` | `user`: each Home Assistant user arranges their own. `config`: one arrangement for everyone, kept in this card's config in the dashboard. |
+| `layout` | the page's path | The name the arrangement is kept under. Set it when two of these cards are on one page, or to share one arrangement between pages. |
+| `default_layout` | none | The arrangement everyone starts from (see below). |
+| `arrange_button` | `true` | The round button under the grid that opens the menu. |
+| `context_menu` | `true` | `false` leaves right-click and long press alone; the button is then the only way in. |
+
+Styling: `--arrange-grid-padding` (default `8px`) is the space around the grid. Everything else follows the theme's variables.
+
+## Arranging
+
+Open the menu with the button under the grid, a right-click anywhere on the page, or a long press on an empty part of it. A long press on a card is left to the card (its hold action).
+
+- **Arrange…** On a wide screen: drag a card to any cell (with a mouse from anywhere on it, with a finger by the grip in its corner, so the page still scrolls). Dropped on another card, the two change places if both fit. Drag the handle in the other corner to resize. A card never overlaps another and never leaves the grid; when something cannot be done, the bar says why. `Columns` and `Rows` add or remove one; the last one goes only when it is empty. There is always an empty row under the last card to drag into, and empty rows at the bottom are not saved. Holding a card near the top or bottom of the window scrolls the page.
+- With the keyboard: Tab to a card, arrow keys move it one cell, Shift and arrow keys resize it, Esc cancels.
+- **Done** saves, **Cancel** (or Esc) drops the changes, **Reset** forgets the arrangement and goes back to the default one.
+- **Hide a card… / Show a hidden card…** A hidden card is taken off the page, so it loads and plays nothing, and keeps its place for when it is shown again.
+- **Reset layout** forgets everything of the user's own: places, sizes, the list's order, what is hidden.
+
+On a narrow screen Arrange only changes the order, with each card's arrows or by dragging its grip onto another card. That order is saved apart from the wide grid: neither changes the other, and Reset only resets the one on screen. Until an order is made, the list follows the wide grid row by row.
+
+## Sizes
+
+- **With nothing arranged**, cards follow one another in the config's order. Each takes the size it asks for: `grid_options` in its config (`columns` out of 12, `rows`), else what the card itself reports, else the full width of a section and a height from its card size. A sections view's section, 12 of those columns, is taken as a quarter of the grid's columns.
+- **In the list**, a card is as wide as its `columns` out of 12, exactly as in one section of a sections view: two 6-column tiles sit side by side, four 3-column buttons share a row.
+- **Children are told they are in a grid** (`layout = "grid"`, as a sections view does), so cards that support it fill the cells they are given.
+- **A card taller than its cells makes its rows taller.** Rows are at least `row_height` and grow with their content; nothing scrolls inside a cell and nothing is cut off. The other choice, a scrollbar inside the cell, traps the finger on a phone and hides content behind a second scroll on a page that already scrolls. The cost is that rows are not all the same height once a card outgrows its cells; giving that card more rows in Arrange evens it out.
+
+## Where the arrangement is kept
+
+- `storage: user`: in Home Assistant's per-user frontend data (key `arrange_grid_card`, one entry per `layout` name), so it follows the user across browsers and the companion app. The browser keeps a copy (`localStorage`, `arrange-grid-card:layout:<name>`) that is shown at once on load; if Home Assistant does not take a save, the copy is marked and sent again on the next load.
+- `default_layout` in the config is what a user sees until they make their own, piece by piece: their grid, their list order and their hidden cards each replace the default's. To ship one: arrange the page yourself, open the card's editor and press **Use my arrangement as the default**. By hand it looks like this (columns and rows count from 0):
+
+```yaml
+default_layout:
+  grid: { cols: 24, rows: 6 }
+  tiles:
+    - { id: porch, c: 0, r: 0, w: 6, h: 1 }
+    - { id: forecast, c: 6, r: 0, w: 12, h: 4 }
+  list: [forecast, porch]   # optional: the order of the narrow list
+  hidden: []                # optional
+```
+
+- `storage: config`: nothing per user. Done writes `default_layout` into this card in the dashboard (the same call the dashboard editor uses), so everyone gets it. Only administrators can arrange then, the dashboard must be one managed in the UI (not YAML), and Home Assistant redraws the view after the save, which restarts the cards on it. When the save cannot be made, the layout is shown as text to paste into the config.
+- A saved card that is no longer in the config leaves its cells empty. A card that is new, or saved somewhere it cannot be, takes the first free place at its own size.
+
+## Editor
+
+The visual editor lists the cards (add with Home Assistant's card picker, edit with each card's own editor or as YAML, move, remove), the grid options, and the default arrangement. Moving or removing cards that have no `id` gives the remaining ones an id first; places saved under their old position keys (`#0`, ...) are not carried over, which is one more reason to set ids from the start.
+
+## Known limits
+
+- `visibility` conditions on a child are not applied: the children are created with Home Assistant's card helpers, and conditions are handled by a wrapper those do not include. Use a `conditional` card as the child instead.
+- The editor borrows Home Assistant's card picker and card editor (`hui-card-picker`, `hui-card-element-editor`), which are loaded by asking for the stack card's editor. If a release changes that, cards are still editable: the config is shown as JSON text instead. Written against Home Assistant 2026.11.
+- A panel view shows no badges; put them in a `heading` card.
+- Two of these cards on one page need different `layout` names (cards added from the picker get one).
+- An arranging grid inside another one works for the menu, but arranging the outer one covers the inner one's cards like any other card.
+- The menu takes over right-click on the page, except in text fields. Set `context_menu: false` to keep the browser's menu.
+
+## Layout
+
+- `dist/arrange-grid-card.js`: the card and its editor in one file, written by hand: no build step, no dependencies. This is the file HACS installs.
+- `hacs.json`: what HACS needs to know.
+- `.github/workflows/validate.yml`: HACS's validation and the tests, on every push and pull request.
+- `tests/`: `node:test` tests with stand-ins for the browser and for Home Assistant (`tests/dom.js`). No packages to install.
+
+```bash
+node --test tests/
+```
+
+```bash
+node --check dist/arrange-grid-card.js
+```
+
+The arranging model (cells and places, Arrange mode, the one-column list, the menu, per-user storage with a browser copy) was copied from the camera wall card in [protect-detections](https://github.com/OnticEntia/protect-detections) and made general. The two files share no code at run time; a fix in one has to be carried to the other by hand.
+
+## Status
+
+Version 0.1.0. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
+
+## Licence
+
+MIT, see [LICENSE](LICENSE).
