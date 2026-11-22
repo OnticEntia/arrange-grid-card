@@ -873,7 +873,7 @@ test("one Arrange: right-click on a group's title sizes its grid; Done fits each
   const ev = fire(byClass(kid(card, "lights").arr, "grip")[0], "contextmenu", { clientX: 10, clientY: 10 });
   assert.equal(ev.defaultPrevented, true);
   const items = () => all(byClass(card, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent);
-  assert.deepEqual(items(), ["Columns: 12  ·  one more", "Columns: one fewer", `Rows: ${lights._arrEdit.grid.rows}  ·  one more`, "Rows: one fewer", "Fit the group's height to its cards", "Add group inside…", "Delete this group"]);
+  assert.deepEqual(items(), ["Columns: 12  ·  one more", "Columns: one fewer", `Rows: ${lights._arrEdit.grid.rows}  ·  one more`, "Rows: one fewer", "Fit the group's height to its cards", "Add card here…", "Add group inside…", "Delete this group"]);
   click(button(card, "Columns: 12  ·  one more"));
   assert.equal(lights._arrEdit.grid.cols, 13);
   assert.equal(items()[0], "Columns: 13  ·  one more"); // the menu stays, with the new count
@@ -1097,6 +1097,72 @@ test("hide_add_menu: the header's add menu is hidden while the card is on the pa
   card.remove(); // another view: the header is as it was
   assert.notEqual(add.style.display, "none");
   root.remove();
+});
+
+test("adding a card from the menu: an entity is searched for by name or id and gets a tile, on the page or in a group", async () => {
+  const states = {
+    "light.desk_lamp": { attributes: { friendly_name: "Desk lamp" } },
+    "light.floor_lamp": { attributes: { friendly_name: "Floor lamp" } },
+    "sensor.outside_temperature": { attributes: { friendly_name: "Outside temperature" } },
+    "switch.x": { attributes: {} },
+  };
+  const { hass, card, saved } = await onDashboard(nestedPage());
+  hass.states = states;
+  const menuItems = (g) => all(byClass(g, "menu")[0], (el) => el.localName === "button").map((el) => el.textContent);
+  const type = (g, text) => {
+    const field = all(byClass(g, "menu")[0], (el) => el.localName === "input")[0];
+    field.value = text;
+    fire(field, "input");
+    return field;
+  };
+  click(card._btn);
+  click(button(card, "Add card…"));
+  assert.deepEqual(menuItems(card), []);
+  type(card, "lamp");
+  assert.deepEqual(menuItems(card), ["Desk lamp  ·  light.desk_lamp", "Floor lamp  ·  light.floor_lamp"]);
+  type(card, "nothing like it");
+  assert.deepEqual(menuItems(card), []);
+  assert.match(byClass(card, "note")[0].textContent, /No entity matches/);
+  const field = type(card, "sensor temp"); // words in any order, from the id as well
+  assert.deepEqual(menuItems(card), ["Outside temperature  ·  sensor.outside_temperature"]);
+  fire(field, "keydown", { key: "Enter" }); // the first match
+  await tick();
+  assert.deepEqual(saved().cards[2], { id: "outside-temperature", type: "tile", entity: "sensor.outside_temperature" });
+  assert.match(card._bar.textContent, /sensor.outside_temperature added to the page/);
+
+  // in a group, from its menu; an id that is taken there gets a number
+  dom.session.clear();
+  const two = await onDashboard(nestedPage());
+  two.hass.states = states;
+  const lights = kid(two.card, "lights").el;
+  fire(lights._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(lights, "Add card here…"));
+  type(lights, "switch.x");
+  click(button(lights, "switch.x"));
+  await tick();
+  assert.deepEqual(two.saved().cards[0].cards[3], { id: "x-2", type: "tile", entity: "switch.x" });
+
+  // while arranging: the same, Arrange goes on, and Cancel takes the card away again
+  dom.session.clear();
+  const three_ = await onDashboard(nestedPage());
+  three_.hass.states = states;
+  const before = JSON.stringify(three_.saved());
+  click(three_.card._btn);
+  click(button(three_.card, "Arrange…"));
+  fire(three_.card._grid, "contextmenu", { clientX: 10, clientY: 10 });
+  click(button(three_.card, "Add card…"));
+  type(three_.card, "desk");
+  click(button(three_.card, "Desk lamp  ·  light.desk_lamp"));
+  await tick();
+  assert.deepEqual(ids(three_.saved()), ["lights", "a", "desk-lamp"]);
+  document.body.replaceChildren();
+  const again = await mount(three_.saved(), { hass: three_.hass });
+  await tick();
+  assert.equal(again._arranging, true);
+  click(button(again, "Cancel"));
+  await tick();
+  await tick();
+  assert.equal(JSON.stringify(three_.saved()), before);
 });
 
 test("moving between groups: only an administrator, and only a dashboard that can be saved", async () => {

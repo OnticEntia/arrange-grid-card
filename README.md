@@ -114,6 +114,7 @@ cards:
 - **In the list a group folds shut** by its title bar, leaving only the title. What is folded is kept per user (with `storage: config`, per browser).
 - **Groups hold groups**, to any depth: "Lights" can hold a group for each room.
 - A group takes `row_height`, `gap`, `storage` and `context_menu` from the card it is in unless it sets its own, shows no arrange button unless `arrange_button: true`, and is a grid or a list as the outer card is.
+- **Adding a card:** the page's menu has **Add card…** (a group's menu **Add card here…**): type part of an entity's name or id, pick it, and a `tile` card for it is written into the dashboard there. For any other card type or options, use the card's editor. The same items are in the right-click menu while arranging.
 - **Adding one:** the page's menu has **Add group…** (and a group's menu **Add group inside…**): type a title and the empty group is written into the dashboard, ready to be filled with **Move to…** or by dragging. Like moving a card, this is for an administrator on a dashboard edited in Home Assistant's UI. The editor's **Add group** does the same from the card's editor; editing a group there opens this same editor for the group's own cards.
 - **Moving a card to another group: drop it there.** While arranging, a card dragged over another group (or out of its own, onto the page) lights that group up and the bar says where it would go. Dropped, it becomes one of that group's cards, at the cell it was dropped on (the next free one if that is taken); in the list, at the row it was dropped on. "In a group" means inside the group's box; the innermost box under the pointer wins.
 - **What a drop does.** Which group a card is in is the dashboard's config, so the drop rewrites the dashboard: for everyone, only by an administrator, and only on a dashboard edited in Home Assistant's UI (not YAML). Everything arranged so far is kept first, as Done would; Home Assistant then redraws the page and Arrange opens again by itself. **Cancel still takes it all back**: the cards return to their groups and every arrangement to what it was when Arrange was opened. Done makes it stay.
@@ -191,7 +192,7 @@ The arranging model (cells and places, Arrange mode, the one-column list, the me
 
 ## Status
 
-Version 0.12.1. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
+Version 0.13.0. The tests cover the grid maths, building and keeping the child cards, arranging by pointer and keyboard, both storage modes, the menu and the editor, all against stand-ins. Rendering was checked in Firefox with placeholder cards; it has had little use inside Home Assistant yet, so expect rough edges and please report them.
 
 ## Licence
 

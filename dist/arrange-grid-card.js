@@ -24,7 +24,7 @@
  * https://github.com/OnticEntia/arrange-grid-card (MIT)
  */
 
-const VERSION = "0.12.1";
+const VERSION = "0.13.0";
 const TAG = "arrange-grid-card";
 const USER_KEY = "arrange_grid_card"; // frontend user data
 const LOCAL_KEY = "arrange-grid-card:layout:"; // + layout name, in localStorage
@@ -344,6 +344,8 @@ const STYLE = `
   .menu input { display: block; width: calc(100% - 16px); margin: 4px 8px 6px; padding: 8px 10px; box-sizing: border-box; font: inherit;
     color: var(--primary-text-color); background: var(--secondary-background-color, #000); border: 1px solid var(--divider-color, #444); border-radius: 8px; }
   .menu input:focus { outline: none; border-color: var(--primary-color); }
+  .menu .note { display: block; padding: 2px 12px 8px; font-size: 13px; color: var(--secondary-text-color); }
+  .menu .note[hidden] { display: none; }
   .menu hr { border: 0; border-top: 1px solid var(--divider-color, #2a2a2a); margin: 4px 0; }
 
   .bar .undo { flex-basis: 100%; display: flex; gap: 10px; align-items: center; justify-content: center; }
@@ -711,6 +713,48 @@ class ArrangeGridCard extends HTMLElement {
       root._note(`Couldn't move it to ${where}: that takes an administrator and a dashboard edited in Home Assistant's UI. Move it in the card's editor instead.`, 9000);
       return false;
     }
+  }
+
+  // A new tile for an entity among this grid's cards, written into the
+  // dashboard. (Any other card, or other options, are the editor's.)
+  async _addTile(entity, as) {
+    const root = this._rootGrid();
+    const path = this._pathFromRoot();
+    const where = this._outerGrid() ? this._config.title || "the group" : "the page";
+    try {
+      await this._dashEdit((page, down) => {
+        const to = down(path);
+        if (!to || !Array.isArray(to.cards)) throw new Error("card not found in the dashboard");
+        const id = as != null ? as : ArrangeGridCard.freeId(ArrangeGridCard.slug(entity), to.cards.map((c) => c.id));
+        to.cards.push({ id, type: "tile", entity });
+      });
+      root._note(`${entity} added to ${where}`, 4000);
+      return true;
+    } catch (err) {
+      root._note("Couldn't add the card: that takes an administrator and a dashboard edited in Home Assistant's UI. Add it in the card's editor instead.", 9000);
+      return false;
+    }
+  }
+
+  static slug(entity) {
+    return String(entity).split(".").slice(1).join(".").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "card";
+  }
+
+  // While arranging: as a group is added, so is a card for an entity.
+  async _arrAddTile(target, entity) {
+    const lead = this._arrLead || this;
+    const session = lead._arrSession || { moves: [], snap: null };
+    const id = ArrangeGridCard.freeId(ArrangeGridCard.slug(entity), target._config.cards.map((c) => c.id));
+    session.moves.push({ add: target._pathFromRoot(), id });
+    session.gone = lead._goneAll();
+    lead._resumeSave(session);
+    lead._arrExit("save", true);
+    const ok = await target._addTile(entity, id);
+    if (!ok) {
+      session.moves.pop();
+      lead._resumeSave(null);
+    }
+    return ok;
   }
 
   // The id a card moved among `ids` goes by: its own while that is free.
@@ -1574,6 +1618,50 @@ class ArrangeGridCard extends HTMLElement {
     return [kit.head(head), field, kit.item("Add", done, { stay: true })];
   }
 
+  // An entity to find by typing, then `go(entity_id)`: the menu's way of
+  // adding a card. The matches are items of the menu, under the field.
+  _entityField(kit, head, go) {
+    const field = document.createElement("input");
+    field.type = "text";
+    field.placeholder = "Search entities";
+    field.setAttribute("aria-label", "Search entities by name or id");
+    const none = make("span", "note", "Type a name or an entity id.");
+    let shown = [];
+    const find = () => {
+      const words = String(field.value || "").toLowerCase().split(/\s+/).filter(Boolean);
+      if (!words.length) return [];
+      const states = (this._hass && this._hass.states) || {};
+      const hits = [];
+      for (const id of Object.keys(states)) {
+        const name = String((states[id].attributes && states[id].attributes.friendly_name) || "");
+        const hay = `${name} ${id}`.toLowerCase();
+        if (words.every((w) => hay.includes(w))) hits.push({ id, name, first: name.toLowerCase().startsWith(words[0]) || id.split(".")[1].startsWith(words[0]) });
+      }
+      hits.sort((a, b) => b.first - a.first || (a.name || a.id).localeCompare(b.name || b.id));
+      return hits.slice(0, 8);
+    };
+    const draw = () => {
+      const menu = this._menu && this._menu.menu;
+      if (!menu) return;
+      for (const b of shown) b.remove();
+      const hits = find();
+      shown = hits.map((h) =>
+        kit.item(h.name ? `${h.name}  ·  ${h.id}` : h.id, () => go(h.id))
+      );
+      none.textContent = hits.length ? "" : String(field.value || "").trim() ? "No entity matches." : "Type a name or an entity id.";
+      none.hidden = !!hits.length;
+      menu.append(...shown);
+    };
+    field.addEventListener("input", draw);
+    field.addEventListener("keydown", (ev) => {
+      if (ev.key !== "Enter" || !shown.length) return;
+      ev.preventDefault();
+      shown[0].onclick();
+    });
+    setTimeout(() => field.focus(), 0);
+    return [kit.head(head), field, none];
+  }
+
   // The menu for one card (`kid`), or for the page (null), at a point on screen.
   _context(x, y, kid, opener) {
     if (this._arranging || !this._kids) return;
@@ -1595,7 +1683,12 @@ class ArrangeGridCard extends HTMLElement {
         ...(moves && !kid ? [kit.item("Move this group to…", () => kit.show(places(nest, nest._kidOf(this))), { stay: true })] : [])] : []),
       ...(kid || !on.length ? [] : [kit.item("Hide a card…", () => kit.show(pick("Hide a card", on, (k) => this._setHidden(k.key, true))), { stay: true, disabled: !may })]),
       ...(off.length ? [kit.item("Show a hidden card…", () => kit.show(pick("Show a hidden card", off, (k) => this._setHidden(back(k), false))), { stay: true, disabled: !may })] : []),
-      ...(this._mayMove() ? [kit.item(nest ? "Add group inside…" : "Add group…", () => kit.show(newGroup), { stay: true })] : []),
+      ...(this._mayMove()
+        ? [
+            kit.item(nest ? "Add card here…" : "Add card…", () => kit.show((k) => this._entityField(k, nest ? `New card in ${this._config.title || "this group"}` : "New card on the page", (entity) => this._addTile(entity))), { stay: true }),
+            kit.item(nest ? "Add group inside…" : "Add group…", () => kit.show(newGroup), { stay: true }),
+          ]
+        : []),
       // (everything of the user's own: places, sizes, the list's order, what is hidden)
       kit.item("Reset layout", () => this._commit(null), { disabled: !may || !this._own() }),
       ...(may ? [] : [kit.hr(), kit.item("Only an administrator can arrange this page", () => {}, { disabled: true })]),
@@ -2005,6 +2098,7 @@ class ArrangeGridCard extends HTMLElement {
       const into = box || (kid ? null : this);
       if (into && this._mayMove()) {
         const inside = !!into._outerGrid();
+        out.push(kit.item(inside ? "Add card here…" : "Add card…", () => kit.show((k) => this._entityField(k, inside ? `New card in ${into._config.title || "this group"}` : "New card on the page", (entity) => this._arrAddTile(into, entity))), { stay: true }));
         out.push(kit.item(inside ? "Add group inside…" : "Add group…", () => kit.show((k) => this._groupField(k, inside ? `New group in ${into._config.title || "this group"}` : "New group on the page", (title) => this._arrAddGroup(into, title))), { stay: true }));
       }
       if (kid) out.push(kit.hr(), kit.item(`${this._arrDeletes() ? "Delete" : "Hide"} this ${box ? "group" : "card"}`, () => this._arrRemove((this._arrGroup(kid) || [{ kid }]).map((m) => m.kid))));
